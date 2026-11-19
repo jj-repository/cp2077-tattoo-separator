@@ -1,0 +1,20 @@
+{
+ "prefix": "mytat",
+ "depot_root": "mytat/tattoos",
+ "diffuse_alpha": 1.0,
+ "parts": [
+  {"id": "left_arm",  "kind": "arm_left",  "label": "Left Arm Tattoo",  "ui_index": -58},
+  {"id": "right_arm", "kind": "arm_right", "label": "Right Arm Tattoo", "ui_index": -59},
+  {"id": "torso",     "kind": "body",      "label": "Torso Tattoo",     "ui_index": -60},
+  {"id": "legs",      "kind": "body",      "label": "Legs Tattoo",      "ui_index": -61},
+  {"id": "chest",     "kind": "body",      "label": "Chest Tattoo",     "ui_index": -62}
+ ],
+ "options": [
+  {"id": "mytat_left_arm_design_a",  "part": "left_arm",  "label": "Design A", "texture": "mytat/tattoos/textures/design_a_left_arm.xbm"},
+  {"id": "mytat_left_arm_design_b",  "part": "left_arm",  "label": "Design B", "texture": "mytat/tattoos/textures/design_b_left_arm.xbm"},
+  {"id": "mytat_right_arm_design_a", "part": "right_arm", "label": "Design A", "texture": "mytat/tattoos/textures/design_a_right_arm.xbm"},
+  {"id": "mytat_torso_design_c",     "part": "torso",     "label": "Design C", "texture": "mytat/tattoos/textures/design_c_torso.xbm"},
+  {"id": "mytat_legs_design_c",      "part": "legs",      "label": "Design C", "texture": "mytat/tattoos/textures/design_c_legs.xbm"},
+  {"id": "mytat_chest_design_d",     "part": "chest",     "label": "Design D", "texture": "mytat/tattoos/textures/design_d_chest.xbm"}
+ ]
+}

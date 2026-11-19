@@ -1,0 +1,15 @@
+# game files and textures (never commit other authors' work)
+*.archive
+*.xbm
+*.png
+*.json
+!options.example.json
+
+# work folders
+templates/
+out/
+src/
+work/
+tmp/
+packed/
+__pycache__/

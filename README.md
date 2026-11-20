@@ -1,9 +1,15 @@
 # Tattoo Switchers for Cyberpunk 2077
 
-Turn body-tattoo mods into **selectable character-creation options**: one row per body part
-(Left Arm, Right Arm, Torso, Legs, Chest), each with *Off* plus your designs. Rows for different
-parts stack, so you can wear one arm design, a different torso design and a chest piece at once,
-and change them any time in the mirror.
+Normally a tattoo mod paints its tattoo onto your character permanently. You can't turn it off,
+and you can't combine two tattoo mods.
+
+This script turns tattoos into **choices in the character editor** (the mirror), like hairstyles:
+
+- Each body part gets its own setting: Left Arm, Right Arm, Torso, Legs, Chest.
+- For each part you pick a tattoo, or *Off* for no tattoo there.
+- The parts are independent. For example: a dragon on the left arm, nothing on the right arm,
+  and a different design on the torso.
+- You can change them any time at the mirror.
 
 This repo holds a small build script and docs. **It contains no textures and no game files.**
 
@@ -27,7 +33,7 @@ using ArchiveXL's character-creation support (CCXL). The approach and the templa
 of the skin. Each tattoo design is one *appearance* of that mesh, with its own material that only
 points at the design's texture. Because it's a separate mesh, the skin underneath stays untouched.
 
-**One switcher row per body part.** Each part gets a row: *Off*, then every design for that part.
+**One switcher row per body part.** Each part gets a row: *Off* (no tattoo on that part), then every design for that part.
 
 **How the files fit together:**
 
@@ -172,7 +178,7 @@ Each of these broke something in-game before it was fixed; `build.py` handles th
 - **Decal material.** Diffuse only, strength via `DiffuseAlpha`. If ink looks too hard, lower
   `diffuse_alpha`.
 - **Every render chunk gets the material.** Otherwise parts of the limb stay bare.
-- **Old replacers.** Leave the original tattoo replacer installed and the tattoo shows even with Off.
+- **Old replacers.** Leave the original tattoo replacer installed and the tattoo stays on the skin even when the row is set to Off.
 
 ## Using it with a salon or tattoo-studio mod
 

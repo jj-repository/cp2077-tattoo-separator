@@ -116,6 +116,20 @@ def main():
         ),
     )
     a = ap.parse_args()
+    try:
+        build(a.templates, a.out, a.config)
+    except OrderError as e:
+        sys.exit(str(e))
+
+
+class OrderError(Exception):
+    """Existing options were reordered or removed (see check_order)."""
+
+
+def build(templates, out_dir, config):
+    """Write every generated file as <out_dir>/<depot path>.json plus the .archive.xl.
+    Returns (archive.xl path, sorted texture depot paths). Raises OrderError / AssertionError."""
+    a = argparse.Namespace(templates=templates, out=out_dir, config=config)
     cfg = json.load(open(a.config, encoding="utf-8"))
 
     prefix = cfg["prefix"]
@@ -347,6 +361,7 @@ def main():
         *sorted(set(tex.values())),
         sep="\n  ",
     )
+    return xl, sorted(set(tex.values()))
 
 
 def lock_path(config):
@@ -366,7 +381,7 @@ def check_order(config, parts, opts):
     new = order(parts, opts)
     for p, ids in old.items():
         if new.get(p, [])[: len(ids)] != ids:
-            sys.exit(
+            raise OrderError(
                 "option order changed for part %r (append only, or existing saves pick the wrong tattoo).\n"
                 "  was: %s\n  now: %s\nDelete %s if you accept that."
                 % (p, ids, new.get(p), lock_path(config))

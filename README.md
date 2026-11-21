@@ -3,8 +3,53 @@
 Pick your body tattoos in the character editor (the mirror), the same way you pick a hairstyle.
 Each body part gets its own setting, and you can change them whenever you like.
 
-This repo contains a build script and these instructions. It contains **no tattoo pictures and
-no game files**.
+This repo contains a small program with a window (the GUI), the build script behind it, and these
+instructions. It contains **no tattoo pictures and no game files**.
+
+---
+
+## Easy way: the GUI
+
+You don't need to know any programming for this. You need the things from
+[section 4](#4-what-you-need): Python, Pillow, WolvenKit, ArchiveXL and the Fun Tattoos download.
+Sections 1 to 3 explain what the mod does, if you're curious.
+
+1. **Start it.** Double-click `Start GUI.bat`.
+2. **Find WolvenKit (once).** Click *Find WolvenKit...* and pick `WolvenKit.CLI.exe`. That's the
+   console version of WolvenKit (download "WolvenKit Console" from the WolvenKit GitHub page if you
+   only have the normal one). The GUI remembers it.
+3. **Get the templates (once).** Click *Get templates...* and pick `fun_tattoos_angel_funsix.archive`
+   from the Fun Tattoos download. The GUI takes out the parts it needs by itself.
+4. **Name your mod.** Type a short name in *Mod name*, for example `mytat` (lowercase letters,
+   digits and `_`). Set *Ink strength*: `1.0` is full colour, `0.6` looks faded.
+5. **Add tattoos.** Every tattoo becomes one choice in the character editor.
+   - *Add picture (PNG)...*: your own picture. Then type the name shown in the game and pick the
+     body part.
+   - *Add from tattoo mod...*: pick a tattoo mod's `.archive` (or an `.xbm` from it). The GUI finds
+     the tattoo pictures inside: left arm, right arm, and full body.
+   - *Split full-body picture...*: for a picture that covers the whole body. The GUI cuts it into
+     **Torso**, **Legs** and **Chest** (the whole picture) and shows you the three parts. The red line
+     is where it cuts. Leave it at `0.59` unless a design gets cut in the wrong place.
+   - *Rename...* changes the name shown in the game. *Remove* takes a tattoo off the list.
+6. **Build.** Click *Build mod*. After a minute or two you get two files in the `output` folder
+   (*Open folder* shows it):
+   - `<mod name>_tattoos.archive`
+   - `<mod name>_tattoos.archive.xl`
+
+   The first time, the GUI may ask for your `Cyberpunk 2077` folder. WolvenKit needs one file from
+   the game (`oo2ext_7_win64.dll`) to pack pictures correctly. The GUI copies it into your user
+   folder. Nothing in the game is changed.
+7. **Install.** Click *Install to game...* and pick your `Cyberpunk 2077` folder, or copy both
+   files into `Cyberpunk 2077\archive\pc\mod\` yourself. **Then remove the tattoo mods you took the
+   designs from** (see step 6 of the manual way for why).
+
+> **Important: you can add tattoos later, but you can't remove or move tattoos you already built.**
+> The game saves your choice as a number ("3rd entry"). If an entry disappeared, old saves would
+> suddenly show a different tattoo. The list marks those tattoos with *in built mod*. You can still
+> rename them. New tattoos always go to the end of the list.
+
+If something goes wrong, the GUI tells you what's missing, and the box at the bottom shows what it
+did. Your list is kept in `work\<mod name>\` and comes back when you start the GUI again.
 
 ---
 
@@ -89,14 +134,17 @@ still don't replace each other (details in section 6).
   what lets mods add new settings to the character editor.
 - [WolvenKit](https://github.com/WolvenKit/WolvenKit), the standard modding tool for packing
   game files.
-- Python 3.8 or newer. For `tools/split_overlay.py` you also need Pillow
-  (`pip install pillow`).
+- Python 3.8 or newer ([python.org](https://www.python.org/), tick *Add python.exe to PATH* when
+  installing). For the GUI and `tools/split_overlay.py` you also need Pillow: open a command
+  prompt and type `pip install pillow`.
 - [Fun Tattoos](https://www.nexusmods.com/cyberpunk2077/mods/33230), for the templates (see
   section 3).
 - A **female V with the Angel body**. The templates are made for that body. On another body the
   layers would not fit.
 
-## 5. Step by step
+## 5. Manual way (step by step)
+
+This is what the GUI does for you. Use it if you want full control, or to script your own build.
 
 ### Step 1: Get the templates out of Fun Tattoos
 
@@ -252,7 +300,7 @@ people's designs unless they allow it.
 
 ## License
 
-The code in this repo (`build.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
+The code in this repo (`build.py`, `tattoo_switcher_gui.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
 does not cover Fun Tattoos' files, game files or tattoo pictures.
 
 by jj-repository

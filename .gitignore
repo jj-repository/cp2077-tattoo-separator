@@ -4,6 +4,8 @@
 *.png
 *.json
 !options.example.json
+# GUI: remembered WolvenKit/game folder (local paths)
+gui_settings.json
 
 # work folders
 templates/
@@ -12,4 +14,5 @@ src/
 work/
 tmp/
 packed/
+output/
 __pycache__/

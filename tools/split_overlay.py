@@ -19,32 +19,37 @@ Needs Pillow (pip install pillow).
 import argparse, os
 from PIL import Image
 
-ap = argparse.ArgumentParser()
-ap.add_argument("png")
-ap.add_argument("out")
-ap.add_argument("name")
-ap.add_argument("--size", type=int, default=4096)
-ap.add_argument(
-    "--split",
-    type=float,
-    default=0.59,
-    help="body-specific UV u where torso ends and legs begin",
-)
-a = ap.parse_args()
 
-im = Image.open(a.png).convert("RGBA")
-if im.size != (a.size, a.size):
-    im = im.resize((a.size, a.size), Image.LANCZOS)
-cut = round(a.split * a.size)
-os.makedirs(a.out, exist_ok=True)
+def split(im, split=0.59, size=4096):
+    """-> {"torso": img, "legs": img, "chest": img}, all size x size RGBA."""
+    im = im.convert("RGBA")
+    if im.size != (size, size):
+        im = im.resize((size, size), Image.LANCZOS)
+    cut = round(split * size)
+    torso = im.copy()
+    torso.paste((0, 0, 0, 0), (cut, 0, size, size))  # clear u >= split
+    legs = im.copy()
+    legs.paste((0, 0, 0, 0), (0, 0, cut, size))  # clear u < split
+    return {"torso": torso, "legs": legs, "chest": im}
 
-torso = im.copy()
-torso.paste((0, 0, 0, 0), (cut, 0, a.size, a.size))  # clear u >= split
-legs = im.copy()
-legs.paste((0, 0, 0, 0), (0, 0, cut, a.size))  # clear u < split
-for part, img in (("torso", torso), ("legs", legs), ("chest", im)):
-    p = os.path.join(a.out, "%s_%s.png" % (a.name, part))
-    img.save(p)
-    print(
-        p, "ink bbox:", img.getchannel("A").getbbox()
-    )  # None = nothing left on this side
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("png")
+    ap.add_argument("out")
+    ap.add_argument("name")
+    ap.add_argument("--size", type=int, default=4096)
+    ap.add_argument(
+        "--split",
+        type=float,
+        default=0.59,
+        help="body-specific UV u where torso ends and legs begin",
+    )
+    a = ap.parse_args()
+    os.makedirs(a.out, exist_ok=True)
+    for part, img in split(Image.open(a.png), a.split, a.size).items():
+        p = os.path.join(a.out, "%s_%s.png" % (a.name, part))
+        img.save(p)
+        print(
+            p, "ink bbox:", img.getchannel("A").getbbox()
+        )  # None = nothing left on this side

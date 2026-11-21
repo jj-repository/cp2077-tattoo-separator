@@ -1,28 +1,30 @@
-"""Tattoo Switchers GUI: build a tattoo-switcher mod without touching JSON or the command line.
+"""Tattoo Separator GUI: build a tattoo mod with switchable tattoos without touching JSON or the command line.
 
-Start it with "Start GUI.bat" (or: python tattoo_switcher_gui.py). Everything the README's
-"Manual way" does by hand runs here through the WolvenKit CLI and build.py.
+Start it with "Start GUI.bat" (or: python tattoo_separator_gui.py). Everything the README's
+"Manual way" does by hand runs here through the WolvenKit CLI and build.py. On the first start it finds
+WolvenKit (its own download, or Outfit Refitter's) or offers to download the official release.
 
 Windows .exe (build_exe.bat, PyInstaller): the same file frozen. Settings and the work and output
-folders then live next to TattooSwitcher.exe, or in %LOCALAPPDATA%/TattooSwitcher if that folder is
+folders then live next to TattooSeparator.exe, or in %LOCALAPPDATA%/TattooSeparator if that folder is
 read-only.
 
 Self-test without a window (needs the Fun Tattoos archive and some tattoo sources):
-  python tattoo_switcher_gui.py --selftest <empty scratch dir> --fun <Fun Tattoos Angel .archive>
+  python tattoo_separator_gui.py --selftest <empty scratch dir> --fun <Fun Tattoos Angel .archive>
       --arm <arm tattoo mod .archive or .xbm> --png <arm tattoo .png> --body <full-body mod .archive / v_overlay .xbm / .png>
       [--wk <WolvenKit.CLI.exe>]
-  (TattooSwitcher.exe --selftest ... works too; the windowed exe has no console, so it writes
+  (TattooSeparator.exe --selftest ... works too; the windowed exe has no console, so it writes
   selftest.log into the scratch dir and exits 0 / 1.)
 
 GUI test (drives the real window, every button; see guitest.py):
-  python tattoo_switcher_gui.py --guitest <empty scratch dir> --fun ... --mod ... --xbm ... --png ... [--wk ...]
+  python tattoo_separator_gui.py --guitest <empty scratch dir> --fun ... --mod ... --xbm ... --png ... [--wk ...]
 
 Threads: workers get only the queue and plain values (task -> _work). Never touch Tk from them.
 """
 
-import contextlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, traceback
+import contextlib, glob, hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading
+import traceback, urllib.request, zipfile
 
-VERSION = "1.1"
+VERSION = "1.2"
 HERE = os.path.dirname(
     os.path.abspath(__file__)
 )  # bundled files (frozen: PyInstaller's _internal)
@@ -30,16 +32,42 @@ sys.path[:0] = [HERE, os.path.join(HERE, "tools")]
 import build as tsbuild  # noqa: E402  (build.py next to this file)
 
 
+LOCAL = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+
+
+def move_old_folder(old, new):
+    """Up to 1.1 the tool was called Tattoo Switchers: move its folder over once. -> the folder to use."""
+    if not os.path.exists(new) and os.path.isdir(old):
+        try:
+            os.rename(old, new)
+        except OSError:
+            return old
+    return new
+
+
+DATA = move_old_folder(os.path.join(LOCAL, "TattooSwitcher"), os.path.join(LOCAL, "TattooSeparator"))
+
+
+def take_over_old_list(user):
+    """1.1 unzipped as TattooSwitcher next to this folder: copy its settings, lists and output over once.
+    The old folder stays as it is. -> True if something was copied."""
+    old = os.path.join(os.path.dirname(user), "TattooSwitcher")
+    if os.path.exists(os.path.join(user, "gui_settings.json")) or not os.path.isfile(
+        os.path.join(old, "gui_settings.json")
+    ):
+        return False
+    for n in ("work", "output"):
+        if os.path.isdir(os.path.join(old, n)):
+            shutil.copytree(os.path.join(old, n), os.path.join(user, n), dirs_exist_ok=True)
+    shutil.copy(os.path.join(old, "gui_settings.json"), user)
+    return True
+
+
 def _user_dir():
     """Where settings, work and output go: this folder, or next to the .exe when frozen."""
     if not getattr(sys, "frozen", False):
         return HERE
-    for d in (
-        os.path.dirname(sys.executable),
-        os.path.join(
-            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "TattooSwitcher"
-        ),
-    ):
+    for d in (os.path.dirname(sys.executable), DATA):
         # really try to write: os.access lies on Windows, and tempfile retries forever on a denied folder
         test = os.path.join(d, ".write_test")
         try:
@@ -49,10 +77,13 @@ def _user_dir():
             return d
         except OSError:
             pass
-    raise SystemExit("No writable folder for Tattoo Switchers' settings.")
+    raise SystemExit("No writable folder for Tattoo Separator's settings.")
 
 
 USER = _user_dir()
+if getattr(sys, "frozen", False):
+    with contextlib.suppress(OSError):
+        take_over_old_list(USER)
 
 try:
     from PIL import Image
@@ -61,7 +92,27 @@ except ImportError:  # shown as a message box / console line in main()
     Image = None
 
 SETTINGS = os.path.join(USER, "gui_settings.json")
-OODLE = os.path.join(os.environ.get("LOCALAPPDATA", ""), "oo2ext_7_win64.dll")
+OODLE = os.path.join(LOCAL, "oo2ext_7_win64.dll")
+# WolvenKit: our own download, or the copy the Outfit Refitter (same author; called Body Refitter in 1.0) got
+WK_HOME = os.path.join(DATA, "wolvenkit")
+REFITTER_WK = [
+    os.path.join(LOCAL, n, "wolvenkit", "WolvenKit.CLI.exe")
+    for n in ("OutfitRefitter", "BodyRefitter")
+]
+WK_VERSION = "9.1.1"
+WK_URL = (
+    "https://github.com/WolvenKit/WolvenKit/releases/download/%s/WolvenKit.Console-%s.zip"
+    % ((WK_VERSION,) * 2)
+)
+WK_PAGE = "https://github.com/WolvenKit/WolvenKit/releases/tag/" + WK_VERSION
+WK_SHA256 = "a14eae46931251635256e7b209cd4aa998ae5039a5fbd506fefaab671bf7f451"  # from the GitHub release page
+DOTNET_URL = "https://dotnet.microsoft.com/download/dotnet/10.0"
+# as Outfit Refitter writes them: without withMaterials=false, 9.1.1's texture export asks for --gamepath
+WK_APPSETTINGS = {
+    "Logging": {"LogLevel": {"Default": "Information", "Microsoft": "Warning"}},
+    "XbmExportArgs": {"UncookExtension": "dds"},
+    "MeshExportArgs": {"withMaterials": False, "isGLBinary": True, "lodFilter": False},
+}
 
 # The 8 Fun Tattoos files build.py copies, plus one texture per layer used as the base when a PNG
 # is turned into an .xbm (import -k keeps the texture's game settings, takes the PNG's pixels).
@@ -99,9 +150,11 @@ class UserError(Exception):
 
 
 RUNNING = set()  # WolvenKit processes still running
+STOP = threading.Event()  # the window is closing: a running download stops
 
 
 def stop_running():
+    STOP.set()
     for p in list(RUNNING):
         with contextlib.suppress(OSError):
             p.kill()
@@ -163,13 +216,11 @@ class WolvenKit:
     def __init__(self, exe, log=print):
         if not exe or not os.path.isfile(exe):
             raise UserError(
-                "WolvenKit is not set up yet.\nClick 'Find WolvenKit...' and pick WolvenKit.CLI.exe "
-                "(it comes with WolvenKit, or download the 'WolvenKit Console' zip from GitHub)."
+                "WolvenKit is not set up yet. Click 'WolvenKit...' at the top."
             )
         if os.path.basename(exe).lower() != "wolvenkit.cli.exe":
             raise UserError(
-                "Please pick WolvenKit.CLI.exe (the console version), not %s."
-                % os.path.basename(exe)
+                "That is not the right WolvenKit file (%s)." % os.path.basename(exe)
             )
         self.exe, self.log = exe, log
 
@@ -197,6 +248,13 @@ class WolvenKit:
             out = r.communicate()[0]
         finally:
             RUNNING.discard(r)
+        if re.search(
+            r"install.{0,30}[.]NET|[.]NET.{0,60}(not found|missing)", out, re.I | re.S
+        ):
+            raise UserError(
+                "WolvenKit needs the free Microsoft .NET 10 Runtime.\nInstall it from %s "
+                "(pick '.NET Runtime 10', Windows x64), then try again." % DOTNET_URL
+            )
         if (
             r.returncode not in ok
             or "Unhandled exception" in out
@@ -207,6 +265,7 @@ class WolvenKit:
                 "unbundle": "read %s. It may be damaged, or not a Cyberpunk .archive file",
                 "archiveinfo": "read %s. It may be damaged, or not a Cyberpunk .archive file",
                 "export": "turn %s into a picture. It may be damaged, or not a tattoo texture",
+                "--version": "start",
             }.get(args[0], "build the mod files (step '%s')" % args[0])
             if "%s" in what:
                 what %= os.path.basename(args[1])
@@ -237,6 +296,164 @@ class WolvenKit:
             for l in out.splitlines()
             if "\\" in l and not l.lstrip().startswith("[")
         ]
+
+
+def find_wk(path):
+    """A WolvenKit folder, or any file in it -> its WolvenKit.CLI.exe (searched 2 folders deep), or None."""
+    top = path if os.path.isdir(path) else os.path.dirname(path)
+    for d, dirs, files in os.walk(top):
+        if any(f.lower() == "wolvenkit.cli.exe" for f in files):
+            return os.path.join(d, "WolvenKit.CLI.exe")
+        if d.count(os.sep) - top.count(os.sep) >= 2:
+            dirs[:] = []
+    return None
+
+
+def download_wolvenkit(home, url, log, progress):
+    """The official WolvenKit release zip -> home/WolvenKit.CLI.exe, checked against its SHA-256.
+    Runs in a worker: plain values in, log/progress only put into the queue."""
+    parent = os.path.dirname(home)
+    os.makedirs(parent, exist_ok=True)
+    part = os.path.join(parent, "wolvenkit_download.part")
+    tmp = os.path.join(parent, "wolvenkit_unzip")
+    log(
+        "Downloading WolvenKit %s from its official GitHub page (about 45 MB) ..."
+        % WK_VERSION
+    )
+    h = hashlib.sha256()
+    try:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "TattooSeparator"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+                total, got = int(r.headers.get("Content-Length") or 0), 0
+                while True:
+                    b = r.read(1 << 20)
+                    if not b:
+                        break
+                    if STOP.is_set():
+                        raise UserError("The download was stopped.")
+                    f.write(b)
+                    h.update(b)
+                    got += len(b)
+                    if total:
+                        progress(got / total)
+        except OSError as e:
+            raise UserError(
+                "Could not download WolvenKit. Check your internet connection and try again.\n\n"
+                "Or download it yourself: open\n%s\ndownload WolvenKit.Console-%s.zip and unzip it. Then click "
+                "'WolvenKit...', choose 'I already have WolvenKit' and pick a file in that folder.\n\n(%s)"
+                % (WK_PAGE, WK_VERSION, getattr(e, "reason", None) or e)
+            )
+        if h.hexdigest() != WK_SHA256:
+            raise UserError(
+                "The WolvenKit download is damaged (it doesn't match the official file). Please try again."
+            )
+        log("Download checked (checksum OK). Unpacking ...")
+        shutil.rmtree(tmp, ignore_errors=True)
+        with zipfile.ZipFile(part) as z:
+            z.extractall(tmp)
+        found = glob.glob(os.path.join(tmp, "**", "WolvenKit.CLI.exe"), recursive=True)
+        if not found:
+            raise UserError(
+                "The WolvenKit download doesn't contain the expected program. Please try again."
+            )
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.move(os.path.dirname(found[0]), home)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            os.remove(part)
+    return finish_wolvenkit(home, log)
+
+
+def copy_wolvenkit(exe, home, log):
+    """A WolvenKit the user already has -> copied into home (their own copy and its settings stay untouched)."""
+    src = os.path.dirname(exe)
+    if os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(home)):
+        log("Copying your WolvenKit from %s ..." % src)
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.copytree(src, home)
+    return finish_wolvenkit(home, log)
+
+
+def finish_wolvenkit(home, log):
+    """Our settings into home's appsettings.json (stock 9.1.1 can't export textures without them), then a test start."""
+    exe = os.path.join(home, "WolvenKit.CLI.exe")
+    with open(os.path.join(home, "appsettings.json"), "w", encoding="utf-8") as f:
+        json.dump(WK_APPSETTINGS, f, indent=1)
+    v = WolvenKit(exe, log).run("--version").strip()  # starts? (else: plain .NET message)
+    if not v.startswith(WK_VERSION):
+        log("Note: this WolvenKit is version %s; this program is tested with %s." % (v[:20], WK_VERSION))
+    log("WolvenKit is ready.")
+    return exe
+
+
+def is_game_dir(p):
+    return bool(p) and os.path.isfile(
+        os.path.join(p, "bin", "x64", "Cyberpunk2077.exe")
+    )
+
+
+def _reg(root, key, value):
+    try:
+        import winreg
+
+        with winreg.OpenKey(root, key) as k:
+            return winreg.QueryValueEx(k, value)[0]
+    except OSError:
+        return None
+
+
+def find_game():
+    """Steam libraries, GOG and Epic installs, then common folders. -> path or None. (From Outfit Refitter.)"""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    cands = []
+    steam = _reg(
+        winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"
+    ) or _reg(
+        winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"
+    )
+    if steam:
+        libs = [steam]
+        try:
+            with open(
+                os.path.join(steam, "steamapps", "libraryfolders.vdf"), encoding="utf-8"
+            ) as f:
+                libs += [
+                    p.replace("\\\\", "\\")
+                    for p in re.findall(r'"path"\s+"([^"]+)"', f.read())
+                ]
+        except OSError:
+            pass
+        cands += [
+            os.path.join(l, "steamapps", "common", "Cyberpunk 2077") for l in libs
+        ]
+    for key in (
+        r"SOFTWARE\WOW6432Node\GOG.com\Games\1423049311",
+        r"SOFTWARE\GOG.com\Games\1423049311",
+    ):
+        cands.append(_reg(winreg.HKEY_LOCAL_MACHINE, key, "path"))
+    for m in glob.glob(r"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests\*.item"):
+        try:
+            with open(m, encoding="utf-8") as f:
+                j = json.load(f)
+            if "cyberpunk" in j.get("DisplayName", "").lower():
+                cands.append(j.get("InstallLocation"))
+        except (OSError, ValueError):
+            pass
+    for drive in "CDEFGH":
+        for sub in (
+            r"Program Files (x86)\Steam\steamapps\common",
+            r"SteamLibrary\steamapps\common",
+            r"GOG Galaxy\Games",
+            r"Program Files\Epic Games",
+            r"Games",
+        ):
+            cands.append(os.path.join(drive + ":\\", sub, "Cyberpunk 2077"))
+    return next((c for c in cands if is_game_dir(c)), None)
 
 
 def oodle_ok():
@@ -282,7 +499,7 @@ def import_templates(wk, src, tdir, log=print):
             "Please pick the Fun Tattoos .archive file (or a folder of JSON files)."
         )
     with tempfile.TemporaryDirectory(prefix="tattoo_tpl_") as tmp:
-        log("Extracting templates from %s ..." % os.path.basename(src))
+        log("Taking the needed parts out of %s ..." % os.path.basename(src))
         wk.unbundle(src, os.path.join(tmp, "raw"), FUN_REGEX)
         files = {}
         for d, _, fs in os.walk(os.path.join(tmp, "raw")):
@@ -309,7 +526,7 @@ def import_templates(wk, src, tdir, log=print):
             "WolvenKit did not convert all templates: "
             + ", ".join(templates_missing(tdir))
         )
-    log("Templates ready (%d files)." % len(TEMPLATES))
+    log("Fun Tattoos file ready (%d parts taken out)." % len(TEMPLATES))
 
 
 # ----------------------------------------------------------------------------- tattoo sources
@@ -350,10 +567,12 @@ class Project:
         self.dir = os.path.join(base, "work", prefix)
         self.tex = os.path.join(self.dir, "textures")
         self.tattoos, self.alpha = [], 1.0
+        self.sources = []  # file names of the tattoo mods (.archive) designs were taken from
         try:
             with open(os.path.join(self.dir, "list.json"), encoding="utf-8") as f:
                 d = json.load(f)
             self.tattoos, self.alpha = d["tattoos"], d.get("diffuse_alpha", 1.0)
+            self.sources = list(d.get("sources", []))
         except FileNotFoundError:
             pass
         except (OSError, ValueError, KeyError, TypeError):
@@ -367,7 +586,9 @@ class Project:
         os.makedirs(self.tex, exist_ok=True)
         with open(os.path.join(self.dir, "list.json"), "w", encoding="utf-8") as f:
             json.dump(
-                {"diffuse_alpha": self.alpha, "tattoos": self.tattoos}, f, indent=1
+                {"diffuse_alpha": self.alpha, "tattoos": self.tattoos, "sources": self.sources},
+                f,
+                indent=1,
             )
 
     def locked(self):
@@ -465,7 +686,7 @@ class Project:
             raise UserError("Add at least one tattoo first.")
         if templates_missing(tdir):
             raise UserError(
-                "The templates are not set up yet. Click 'Get templates...' first."
+                "The Fun Tattoos file is not set up yet. Click 'Fun Tattoos file...' first."
             )
         for t in self.tattoos:
             if not os.path.isfile(self.file(t)):
@@ -477,7 +698,7 @@ class Project:
             ):
                 raise UserError(
                     "PNG tattoos need a base texture from the Fun Tattoos archive.\n"
-                    "Click 'Get templates...' and pick the Fun Tattoos .archive (not a JSON folder)."
+                    "Click 'Fun Tattoos file...' and pick the Fun Tattoos .archive (not a JSON folder)."
                 )
         cfg = os.path.join(self.dir, "options.json")
         with open(cfg, "w", encoding="utf-8") as f:
@@ -571,6 +792,25 @@ def _rel_files(d):
     return [
         os.path.relpath(os.path.join(r, f), d) for r, _, fs in os.walk(d) for f in fs
     ]
+
+
+REMOVE_OLD = (
+    "Important: after installing your built tattoo mod, remove the original tattoo mods you took the designs "
+    "from (e.g. a full-body tattoo mod). Otherwise they keep painting the tattoo onto the skin, even when the "
+    "row is set to Off."
+)
+
+
+def still_installed(game, names):
+    """Tattoo mods the designs came from that are still in archive/pc/mod (any subfolder, any case)."""
+    want = {n.lower() for n in names}
+    mod = os.path.join(game, "archive", "pc", "mod")
+    return sorted(
+        os.path.relpath(os.path.join(d, f), mod)
+        for d, _, fs in os.walk(mod)
+        for f in fs
+        if f.lower() in want
+    )
 
 
 def install(files, game):
@@ -709,14 +949,21 @@ HELP_TEXT = """What this program does
 It builds one small mod that adds tattoo choices to the character editor (the mirror). Each body part (left arm, right arm, torso, legs, chest) gets its own setting, so you can switch tattoos on and off in the game instead of having a tattoo mod that is always on.
 For now it works only for a female V with the Angel body.
 
-You need: WolvenKit, ArchiveXL (installed in the game) and the Fun Tattoos download.
+You need: ArchiveXL (installed in the game) and the Fun Tattoos download. WolvenKit (a free modding tool) is set up by the program itself.
+
+The line at the top of the window always tells you the next step.
+
+IMPORTANT: remove the original tattoo mods
+After installing your built tattoo mod, remove the original tattoo mods you took the designs from (e.g. a full-body tattoo mod). Otherwise they keep painting the tattoo onto the skin, even when the row is set to Off. After 'Install to game...' the program lists the ones it still finds in your game.
 
 Steps, in order
-1. Find WolvenKit (once). Click 'Find WolvenKit...' and pick WolvenKit.CLI.exe. That's the console version of WolvenKit. If you only have the normal WolvenKit, download "WolvenKit Console" from the WolvenKit GitHub page.
+1. WolvenKit (once). On the first start the program asks: "Download it now automatically?". Click 'Yes, download it'. It downloads WolvenKit 9.1.1 (about 45 MB) from WolvenKit's official GitHub page and checks the file. If you use the Outfit Refitter, its WolvenKit is used and nothing is asked.
+   If you already have WolvenKit, click 'I already have WolvenKit' and pick the WolvenKit program, or any file in your WolvenKit folder. The program finds the part it needs and copies it into its own folder; your WolvenKit stays as it is. 'WolvenKit...' (top right) changes it later.
+   WolvenKit needs the free Microsoft .NET 10 Runtime. If it is missing, the program tells you where to get it.
 
-2. Get the templates (once). Download Fun Tattoos from Nexus Mods:
+2. Fun Tattoos file (once). Download Fun Tattoos from Nexus Mods:
    https://www.nexusmods.com/cyberpunk2077/mods/33230
-   You need the file called "Fun Tattoos Angel Body". Click 'Get templates...' and pick fun_tattoos_angel_funsix.archive from that download. The program takes out only the parts it needs. 'Templates' then says 'ready'.
+   You need the file called "Fun Tattoos Angel Body". Click 'Fun Tattoos file...' and pick fun_tattoos_angel_funsix.archive from that download. The program takes out only the parts it needs. 'Fun Tattoos file' then says 'ready'.
 
 3. Name your mod and set the ink. Type a short name in 'Mod name' (lowercase letters, digits and _, for example mytat). 'Ink strength': 1.0 is full colour, 0.6 looks faded.
 
@@ -726,7 +973,7 @@ Steps, in order
    - 'Split full-body picture...': for a picture that covers the whole body. It is cut into three choices: Torso (the upper body, left of the red line), Legs (right of the red line) and Chest (the whole picture, uncut). Leave the red line at 0.59 unless a design is cut in the wrong place. Untick the parts you don't want.
    - 'Rename...' changes the name shown in the game. 'Remove' takes a new tattoo off the list.
 
-5. Build. Click 'Build mod' and wait a minute or two. The first time, it may ask for your Cyberpunk 2077 folder to copy one file WolvenKit needs; nothing in the game is changed. You get two files in the output folder ('Open folder' shows it).
+5. Build. Click 'Build mod' and wait a minute or two. The first time, it copies one file WolvenKit needs from your game (oo2ext_7_win64.dll). It finds the game by itself; only if it can't, it asks for your Cyberpunk 2077 folder. Nothing in the game is changed. You get two files in the output folder ('Open folder' shows it).
 
 6. Install. Click 'Install to game...' and pick your Cyberpunk 2077 folder (the one that contains 'bin' and 'archive'). Or copy both files into Cyberpunk 2077\\archive\\pc\\mod yourself.
 
@@ -763,7 +1010,7 @@ def run_gui(setup=None):
             self.out = os.path.join(USER, "output")
             self.thumbs = {}
             self.actions = []  # widgets disabled while a step runs
-            root.title("Tattoo Switchers %s" % VERSION)
+            root.title("Tattoo Separator %s" % VERSION)
             root.report_callback_exception = self.callback_error
             root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -772,17 +1019,22 @@ def run_gui(setup=None):
                 self.actions.append(b)
                 return b
 
-            setup = ttk.LabelFrame(root, text="1. Setup (once)")
-            setup.pack(fill="x", padx=8, pady=(8, 4))
+            # what to do next, in one line ("Step 1: WolvenKit done   Step 2: ...")
+            self.guide = ttk.Label(
+                root, font=("Segoe UI", 10, "bold"), wraplength=900, justify="left"
+            )
+            self.guide.pack(fill="x", padx=10, pady=(8, 0))
+            setup = ttk.LabelFrame(root, text="Setup (once)")
+            setup.pack(fill="x", padx=8, pady=(4, 4))
             self.wk_var, self.tpl_var = tk.StringVar(), tk.StringVar()
             ttk.Label(setup, text="WolvenKit:").grid(
                 row=0, column=0, sticky="w", padx=6, pady=3
             )
             ttk.Label(setup, textvariable=self.wk_var).grid(row=0, column=1, sticky="w")
-            button(setup, "Find WolvenKit...", self.pick_wk).grid(
+            button(setup, "WolvenKit...", self.choose_wk).grid(
                 row=0, column=2, padx=6, sticky="e"
             )
-            ttk.Label(setup, text="Templates:").grid(
+            ttk.Label(setup, text="Fun Tattoos file:").grid(
                 row=1, column=0, sticky="w", padx=6, pady=3
             )
             ttk.Label(setup, textvariable=self.tpl_var).grid(
@@ -790,13 +1042,13 @@ def run_gui(setup=None):
             )
             tb = ttk.Frame(setup)
             tb.grid(row=1, column=2, padx=6, sticky="e")
-            button(tb, "Get templates...", self.pick_templates).pack(side="left")
+            button(tb, "Fun Tattoos file...", self.pick_templates).pack(side="left")
             button(tb, "JSON folder...", lambda: self.pick_templates(folder=True)).pack(
                 side="left", padx=(4, 0)
             )
             setup.columnconfigure(1, weight=1)
 
-            sett = ttk.LabelFrame(root, text="2. Your mod")
+            sett = ttk.LabelFrame(root, text="Your mod")
             sett.pack(fill="x", padx=8, pady=4)
             ttk.Label(sett, text="Mod name:").pack(side="left", padx=6, pady=4)
             self.prefix_var = tk.StringVar(value=self.s.get("prefix", "mytat"))
@@ -826,7 +1078,7 @@ def run_gui(setup=None):
             self.alpha_lbl.pack(side="left")
             ttk.Label(sett, text="(1.0 full colour, 0.6 faded)").pack(side="left")
 
-            lst = ttk.LabelFrame(root, text="3. Tattoos")
+            lst = ttk.LabelFrame(root, text="Tattoos")
             lst.pack(fill="both", expand=True, padx=8, pady=4)
             bar = ttk.Frame(lst)
             bar.pack(fill="x", padx=4, pady=4)
@@ -893,6 +1145,7 @@ def run_gui(setup=None):
             self.refresh_setup()
             self.load_project()
             root.after(100, self.poll)
+            root.after(300, self.first_start)
 
         # ---- plumbing (Tk only on this thread; workers talk through self.q)
         def log(self, msg):
@@ -913,10 +1166,15 @@ def run_gui(setup=None):
                     if kind == "log":
                         self.write_log(val)
                         continue
+                    if kind == "progress":
+                        self.status.configure(
+                            text="Downloading WolvenKit %d%% ..." % (val * 100)
+                        )
+                        continue
                     done, self.on_done = self.on_done, None
                     self.set_busy(False)
                     if kind == "error":
-                        messagebox.showerror("Tattoo Switchers", val)
+                        messagebox.showerror("Tattoo Separator", val)
                     elif done:
                         done(val)
             except queue.Empty:
@@ -926,7 +1184,7 @@ def run_gui(setup=None):
             """Any unexpected error in a button or timer: details in the log box, a plain message."""
             self.write_log("".join(traceback.format_exception(exc, val, tb)))
             messagebox.showerror(
-                "Tattoo Switchers",
+                "Tattoo Separator",
                 "Something unexpected went wrong:\n%s\n\nDetails are in the log box at the bottom. "
                 "Your tattoo list is saved." % val,
             )
@@ -954,7 +1212,7 @@ def run_gui(setup=None):
             try:
                 return fn(*a)
             except UserError as e:
-                messagebox.showerror("Tattoo Switchers", str(e))
+                messagebox.showerror("Tattoo Separator", str(e))
 
         def ready(self):
             """Start of every button that changes something: not busy, and the typed mod name is loaded."""
@@ -966,13 +1224,18 @@ def run_gui(setup=None):
             return self.load_project()
 
         def wk(self):
-            return WolvenKit(self.s.get("wolvenkit"), self.qlog)
+            """WolvenKit for a step. Not set up yet: find it, or ask (download / pick). None = not now."""
+            if not self.find_wk_quietly():
+                self.choose_wk()
+                if not self.wk_path():
+                    return None
+            return WolvenKit(self.wk_path(), self.qlog)
 
         def close(self):
             if self.busy and not messagebox.askyesno(
-                "Close Tattoo Switchers",
+                "Close Tattoo Separator",
                 "A step is still running. Close anyway?\n\n"
-                "The step is stopped. Your tattoo list is kept; just build again next time.",
+                "The step is stopped. Your tattoo list is kept; just start the step again next time.",
             ):
                 return
             stop_running()
@@ -980,38 +1243,159 @@ def run_gui(setup=None):
 
         # ---- setup
         def refresh_setup(self):
+            exe = self.wk_path()
+            # the folder, not the exe: its name would only confuse
             self.wk_var.set(
-                self.s.get("wolvenkit") or "not set - click 'Find WolvenKit...'"
+                os.path.dirname(exe) if exe else "not set - click 'WolvenKit...'"
             )
             miss = templates_missing(self.tdir)
             self.tpl_var.set(
                 "ready"
                 if not miss
-                else "not set - click 'Get templates...' and pick the Fun Tattoos Angel .archive"
+                else "not set - click 'Fun Tattoos file...' and pick the Fun Tattoos Angel .archive"
+            )
+            self.refresh_guide()
+
+        def refresh_guide(self):
+            p = self.project
+            built = (
+                bool(p and p.tattoos and self.built())
+                and {t["key"] for t in p.tattoos} <= p.locked()
+            )
+            steps = (
+                ("WolvenKit", self.wk_path(), "click 'WolvenKit...'"),
+                (
+                    "Fun Tattoos file",
+                    not templates_missing(self.tdir),
+                    "click 'Fun Tattoos file...'",
+                ),
+                ("Tattoos", p and p.tattoos, "add tattoos with the buttons below"),
+                ("Build", built, "click 'Build mod'"),
+            )
+            out = []
+            for i, (name, ok, todo) in enumerate(steps, 1):
+                out.append("Step %d: %s %s" % (i, name, "done" if ok else "- " + todo))
+                if not ok:
+                    break
+            else:
+                out.append("Next: click 'Install to game...'")
+            self.guide.configure(text="     ".join(out))
+
+        def wk_path(self):
+            exe = self.s.get("wolvenkit")
+            return exe if exe and os.path.isfile(exe) else None
+
+        def set_wk(self, exe, how):
+            self.s["wolvenkit"] = exe
+            save_settings(self.s)
+            self.refresh_setup()
+            self.log("%s %s" % (how, os.path.dirname(exe)))
+
+        def find_wk_quietly(self):
+            """Set WolvenKit without asking: the remembered one, our own download, or Outfit Refitter's."""
+            if self.wk_path():
+                return True
+            own = os.path.join(WK_HOME, "WolvenKit.CLI.exe")
+            for exe, how in [(own, "Using WolvenKit in")] + [
+                (r, "Using the WolvenKit that Outfit Refitter downloaded:")
+                for r in REFITTER_WK
+            ]:
+                if os.path.isfile(exe):
+                    self.set_wk(exe, how)
+                    return True
+            return False
+
+        def first_start(self):
+            if not self.busy and not self.find_wk_quietly():
+                self.choose_wk()
+
+        def choose_wk(self):
+            """Ask once, in plain words: download WolvenKit, or use one the user already has."""
+            if self.busy:
+                return
+            exe = self.wk_path()
+            d = tk.Toplevel(self.root)
+            d.title("WolvenKit")
+            d.transient(self.root)
+            d.resizable(False, False)
+            text = (
+                "The tool needs WolvenKit, a free modding tool (about 45 MB).\n\n"
+                "Download it now automatically?"
+            )
+            if exe:
+                text = (
+                    "WolvenKit is set up:\n%s\n\nDownload WolvenKit %s again, or use another WolvenKit you "
+                    "already have?" % (os.path.dirname(exe), WK_VERSION)
+                )
+            ttk.Label(d, text=text, wraplength=460, justify="left").pack(
+                padx=14, pady=(14, 4), anchor="w"
+            )
+            ttk.Label(
+                d,
+                foreground="#555",
+                wraplength=460,
+                justify="left",
+                text="The download comes from WolvenKit's official GitHub page and is checked before use.",
+            ).pack(padx=14, pady=(0, 10), anchor="w")
+            choice = []
+            bb = ttk.Frame(d)
+            bb.pack(padx=14, pady=(0, 14), anchor="e")
+            for label, c in (
+                ("Yes, download it", "download"),
+                ("I already have WolvenKit", "pick"),
+                ("Not now", None),
+            ):
+                ttk.Button(
+                    bb, text=label, command=lambda c=c: (choice.append(c), d.destroy())
+                ).pack(side="left", padx=(6, 0))
+            d.grab_set()
+            self.root.wait_window(d)
+            if choice == ["download"]:
+                self.download_wk()
+            elif choice == ["pick"]:
+                self.pick_wk()
+
+        def download_wk(self):
+            home, url, log, q = WK_HOME, WK_URL, self.qlog, self.q
+            self.task(
+                "Downloading WolvenKit",
+                lambda: download_wolvenkit(
+                    home, url, log, lambda f: q.put(("progress", f))
+                ),
+                lambda exe: self.set_wk(exe, "WolvenKit set:"),
             )
 
         def pick_wk(self):
-            if self.busy:
-                return
             p = filedialog.askopenfilename(
-                title="Pick WolvenKit.CLI.exe",
-                filetypes=[
-                    ("WolvenKit.CLI.exe", "WolvenKit.CLI.exe"),
-                    ("Programs", "*.exe"),
-                ],
+                title="Pick the WolvenKit program, or any file in your WolvenKit folder",
+                filetypes=[("Programs", "*.exe"), ("All files", "*.*")],
             )
             if not p:
                 return
             p = os.path.normpath(p)
-            if self.guard(WolvenKit, p, self.qlog) is None:
-                return
-            self.s["wolvenkit"] = p
-            save_settings(self.s)
-            self.refresh_setup()
-            self.log("WolvenKit set: " + p)
+            exe = find_wk(p)
+            if not exe:
+                return messagebox.showerror(
+                    "Tattoo Separator",
+                    "No WolvenKit found in\n%s\n\nPick a file inside the folder you unzipped WolvenKit into. "
+                    "(The normal WolvenKit app may not include the part this tool needs.)\n\n"
+                    "Easiest: click 'WolvenKit...' and choose 'Yes, download it'."
+                    % (p if os.path.isdir(p) else os.path.dirname(p)),
+                )
+            home, log = WK_HOME, self.qlog
+            self.task(
+                "Copying WolvenKit",
+                lambda: copy_wolvenkit(exe, home, log),
+                lambda e: self.set_wk(e, "WolvenKit set:"),
+            )
 
         def pick_templates(self, folder=False):
             if self.busy:
+                return
+            wk = (
+                None if folder else self.guard(self.wk)
+            )  # WolvenKit first, then the file
+            if not folder and wk is None:
                 return
             if folder:
                 src = filedialog.askdirectory(
@@ -1019,17 +1403,14 @@ def run_gui(setup=None):
                 )
             else:
                 src = filedialog.askopenfilename(
-                    title="Pick the Fun Tattoos Angel archive (fun_tattoos_angel_funsix.archive)",
+                    title="Pick fun_tattoos_angel_funsix.archive from the Fun Tattoos Angel Body download",
                     filetypes=[("Cyberpunk archive", "*.archive")],
                 )
             if not src:
                 return
-            wk = None if folder else self.guard(self.wk)
-            if not folder and wk is None:
-                return
             src, tdir, log = os.path.normpath(src), self.tdir, self.qlog
             self.task(
-                "Getting templates",
+                "Reading the Fun Tattoos file",
                 lambda: import_templates(wk, src, tdir, log),
                 lambda _: self.refresh_setup(),
             )
@@ -1053,7 +1434,7 @@ def run_gui(setup=None):
                     self.prefix_var.set(self.project.prefix)
                 self.loading = True  # the box's FocusOut must not ask again
                 try:
-                    messagebox.showerror("Tattoo Switchers", str(e))
+                    messagebox.showerror("Tattoo Separator", str(e))
                 finally:
                     self.loading = False
                 return False
@@ -1072,6 +1453,7 @@ def run_gui(setup=None):
                     shutil.copytree(self.project.tex, p.tex, dirs_exist_ok=True)
                     p.tattoos = [dict(t) for t in self.project.tattoos]
                     p.alpha = self.project.alpha
+                    p.sources = list(self.project.sources)
                 p.save()
             self.project = p
             self.s["prefix"] = prefix
@@ -1109,6 +1491,7 @@ def run_gui(setup=None):
                 self.tree.selection_set(select)
                 self.tree.see(select)
             self.show_preview()
+            self.refresh_guide()
 
         def selected(self):
             sel = self.tree.selection()
@@ -1168,13 +1551,9 @@ def run_gui(setup=None):
             self.task(
                 "Reading " + os.path.basename(p),
                 lambda: prepare_source(wk, p, tmp),
-                (
-                    lambda items: self.offer(
-                        [(s, pv, "full", n) for s, pv, _, n in items]
-                    )
-                )
-                if full
-                else self.offer,
+                lambda items: self.offer(
+                    [(s, pv, "full" if full else r, n) for s, pv, r, n in items], source=p
+                ),
             )
 
         def add_mod(self):
@@ -1204,20 +1583,28 @@ def run_gui(setup=None):
                 return
             self.read_source(p, full=True)
 
-        def offer(self, items):
-            """One dialog per found picture. row 'full' -> split dialog."""
+        def offer(self, items, source=None):
+            """One dialog per found picture. row 'full' -> split dialog. source: the tattoo mod's .archive,
+            remembered when a design from it was added (to warn if it's still installed)."""
+            count = len(self.project.tattoos)
             for src, prev, row, name in items:
                 if row == "full":
                     self.split_dialog(prev, name)
                 else:
                     self.add_dialog(src, prev, row, name)
+            if source and source.lower().endswith(".archive"):
+                # split pieces are added by a worker afterwards: busy = a split dialog was confirmed
+                name = os.path.basename(source)
+                if (len(self.project.tattoos) > count or self.busy) and name not in self.project.sources:
+                    self.project.sources.append(name)
+                    self.project.save()
             self.refresh_list()
 
         def add_dialog(self, src, prev, row, name):
             try:
                 img = ImageTk.PhotoImage(self.thumb(prev, 200)) if prev else None
             except UserError as e:
-                return messagebox.showerror("Tattoo Switchers", str(e))
+                return messagebox.showerror("Tattoo Separator", str(e))
             d = tk.Toplevel(self.root)
             d.title("Add tattoo")
             d.transient(self.root)
@@ -1270,7 +1657,7 @@ def run_gui(setup=None):
             try:
                 small = self.thumb(png, 300)
             except UserError as e:
-                return messagebox.showerror("Tattoo Switchers", str(e))
+                return messagebox.showerror("Tattoo Separator", str(e))
             S = small.size[0]
             d = tk.Toplevel(self.root)
             d.title("Split full-body picture")
@@ -1336,7 +1723,7 @@ def run_gui(setup=None):
                 label = nv.get().strip()
                 if not parts or not label:
                     return messagebox.showerror(
-                        "Tattoo Switchers",
+                        "Tattoo Separator",
                         "Give it a name and tick at least one part.",
                         parent=d,
                     )
@@ -1396,7 +1783,7 @@ def run_gui(setup=None):
 
         def show_help(self):
             w = tk.Toplevel(self.root)
-            w.title("Tattoo Switchers - Help")
+            w.title("Tattoo Separator - Help")
             w.transient(self.root)
             t = tk.Text(
                 w,
@@ -1429,10 +1816,27 @@ def run_gui(setup=None):
             wk = self.guard(self.wk)
             if not wk:
                 return
+            game = not oodle_ok() and (
+                self.s.get("game") if is_game_dir(self.s.get("game")) else find_game()
+            )
+            if game:  # the game is found: copy the file without asking
+                try:
+                    install_oodle(game)
+                    self.s["game"] = game
+                    save_settings(self.s)
+                    self.log(
+                        "Copied oo2ext_7_win64.dll (needed by WolvenKit) from your game: "
+                        + game
+                    )
+                except (UserError, OSError) as e:
+                    self.log(
+                        "Could not copy oo2ext_7_win64.dll from %s (%s)" % (game, e)
+                    )
             if not oodle_ok():
                 if not messagebox.askokcancel(
                     "One-time setup",
                     "WolvenKit needs a file from the game (oo2ext_7_win64.dll) to pack textures correctly.\n\n"
+                    "The program could not find your game by itself. "
                     "Pick your Cyberpunk 2077 folder next. The file is copied to your user folder; "
                     "nothing in the game is changed.",
                 ):
@@ -1453,9 +1857,9 @@ def run_gui(setup=None):
                     "Done: %s and %s are in %s" % (*map(os.path.basename, res), out)
                 )
                 messagebox.showinfo(
-                    "Tattoo Switchers",
+                    "Tattoo Separator",
                     "Your mod is ready:\n\n%s\n%s\n\nClick 'Install to game...', or copy both files "
-                    "to Cyberpunk 2077\\archive\\pc\\mod\\." % res,
+                    "to Cyberpunk 2077\\archive\\pc\\mod\\.\n\n%s" % (*res, REMOVE_OLD),
                 )
 
             self.log("Building %s_tattoos ..." % p.prefix)
@@ -1467,7 +1871,7 @@ def run_gui(setup=None):
                 os.startfile(self.out)
             except OSError as e:
                 messagebox.showerror(
-                    "Tattoo Switchers",
+                    "Tattoo Separator",
                     "Could not open the folder:\n%s\n\n(%s)" % (self.out, e),
                 )
 
@@ -1481,7 +1885,7 @@ def run_gui(setup=None):
                 )
             g = filedialog.askdirectory(
                 title="Pick the Cyberpunk 2077 folder",
-                initialdir=self.s.get("game") or None,
+                initialdir=self.s.get("game") or find_game() or None,
             )
             if not g:
                 return
@@ -1490,11 +1894,17 @@ def run_gui(setup=None):
                 self.s["game"] = os.path.normpath(g)
                 save_settings(self.s)
                 self.log("Installed into " + mod)
-                messagebox.showinfo(
-                    "Installed",
-                    "Copied both files into\n%s\n\nNow remove the tattoo mods you took the designs from, "
-                    "or they keep painting their tattoo onto the skin." % mod,
-                )
+                left = still_installed(os.path.normpath(g), self.project.sources)
+                if left:
+                    self.log("Still installed: " + ", ".join(left))
+                    messagebox.showwarning(
+                        "Installed - remove the old tattoo mods",
+                        "Copied both files into\n%s\n\nThese tattoo mods are still installed and will paint over "
+                        "your new tattoos:\n  %s\n\nRemove them from archive\\pc\\mod. (Nothing was deleted.)"
+                        % (mod, "\n  ".join(left)),
+                    )
+                else:
+                    messagebox.showinfo("Installed", "Copied both files into\n%s\n\n%s" % (mod, REMOVE_OLD))
 
     try:  # sharp text on scaled Windows displays
         import ctypes
@@ -1526,7 +1936,7 @@ def main():
         try:
             import tkinter.messagebox as mb
 
-            mb.showerror("Tattoo Switchers", msg)
+            mb.showerror("Tattoo Separator", msg)
         except Exception:
             pass
         sys.exit(msg)

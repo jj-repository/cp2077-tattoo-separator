@@ -1,9 +1,13 @@
-"""Drives the real Tattoo Switchers window like a user would: every button, through the widgets.
+"""Drives the real Tattoo Separator window like a user would: every button, through the widgets.
 
-  python tattoo_switcher_gui.py --guitest <empty scratch dir> --fun <Fun Tattoos Angel .archive>
+  python tattoo_separator_gui.py --guitest <empty scratch dir> --fun <Fun Tattoos Angel .archive>
       --mod <tattoo mod .archive with arm + v_overlay textures> --xbm <arm .xbm> --png <arm .png>
-      [--wk <WolvenKit.CLI.exe>] [--nomatch <.archive without tattoo textures>]
-  (TattooSwitcher.exe --guitest ... works the same.)
+      --wk <a WolvenKit.CLI.exe> [--nomatch <.archive without tattoo textures>]
+  (TattooSeparator.exe --guitest ... works the same.)
+
+First run is real: no WolvenKit anywhere (the LOCALAPPDATA paths point into the scratch dir), WolvenKit is
+downloaded for real from GitHub once and checked, a network error and a damaged download are simulated.
+The game folder is found for the game-file step (only read from); installs go to a fake game folder.
 
 Only file pickers and message boxes are replaced (they return prepared answers; every message text is
 logged for review). Everything else is the real window: buttons are found by their text and invoke()d,
@@ -11,12 +15,12 @@ dialogs are filled in through their widgets, builds are awaited through the wind
 Installs go into a fake game folder inside the scratch dir. Writes <scratch>/guitest.log, exits 0 / 1.
 """
 
-import argparse, io, json, os, shutil, subprocess, sys, time, traceback
+import argparse, contextlib, io, json, os, pathlib, shutil, subprocess, sys, threading, time, traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-g = sys.modules["__main__"]  # tattoo_switcher_gui (started through its main())
-assert hasattr(g, "run_gui"), "start this through tattoo_switcher_gui.py --guitest"
+g = sys.modules["__main__"]  # tattoo_separator_gui (started through its main())
+assert hasattr(g, "run_gui"), "start this through tattoo_separator_gui.py --guitest"
 
 LOG = None
 MSGS = []  # (kind, title, text) of every message box
@@ -205,17 +209,182 @@ def logtext(app):
     return app.logbox.get("1.0", "end")
 
 
+def guide(app):
+    return str(app.guide.cget("text"))
+
+
+def no_cli(d):
+    """The word CLI never shows in the window or its dialogs (labels, buttons, shown values)."""
+    texts = [
+        str(w.cget("text"))
+        for w in walk(d.root)
+        if isinstance(w, (ttk.Label, ttk.Button, ttk.LabelFrame))
+    ]
+    texts += [d.app.wk_var.get(), d.app.tpl_var.get()] + [
+        t.title() for t in d.dialogs()
+    ]
+    check(
+        not [t for t in texts if "CLI" in t],
+        "no 'CLI' in the window (%d texts)" % len(texts),
+    )
+
+
+REAL_URL = g.WK_URL
+
+
 # ----------------------------------------------------------------------------- the user session
 def session1(a, d):
     app = d.app
     T = a.t
-    log("== first start")
+    log("== first start: no WolvenKit anywhere -> asks once, in plain words")
+    yield d.dialog("WolvenKit", 10)
+    dlg = d.dialogs("WolvenKit")[0]
+    ask = " ".join(str(w.cget("text")) for w in d.find(ttk.Label, top=dlg))
+    log("  dialog text: " + ask.replace("\n", " | "))
+    check(
+        "free modding tool (about 45 MB)" in ask
+        and "Download it now automatically?" in ask,
+        "asks to download",
+    )
+    check(d.root.title() == "Tattoo Separator 1.2", "window title %r" % d.root.title())
     check(app.wk_var.get().startswith("not set"), "WolvenKit shows 'not set'")
-    check(app.tpl_var.get().startswith("not set"), "templates show 'not set'")
+    check(app.tpl_var.get().startswith("not set"), "Fun Tattoos file shows 'not set'")
+    check(
+        guide(app).startswith("Step 1: WolvenKit - click 'WolvenKit...'"),
+        "guide: step 1",
+    )
     check(
         app.prefix_var.get() == "mytat" and rows(app) == [],
         "default mod 'mytat', empty list",
     )
+    no_cli(d)
+    yield d.click("Not now", dlg)
+    yield d.gone("WolvenKit")
+    check(not app.busy and not app.wk_path(), "'Not now': nothing happens")
+
+    log("== needed by a step -> asked again; download with a network error")
+    g.WK_URL = "http://127.0.0.1:9/WolvenKit.Console.zip"  # nothing listens there
+    yield d.click("Build mod")
+    yield d.dialog("WolvenKit")
+    n = len(MSGS)
+    yield d.click("Yes, download it", d.dialogs("WolvenKit")[0])
+    yield d.idle(120)
+    expect(n, "error", "Could not download WolvenKit. Check your internet connection")
+    check(not app.wk_path() and not app.busy, "still not set")
+    check(
+        not os.listdir(os.path.dirname(g.WK_HOME)),
+        "nothing left behind after the failed download",
+    )
+
+    log(
+        "== Fun Tattoos file without WolvenKit -> asked first; 'Not now' opens no file picker"
+    )
+    n = len(MSGS)
+    yield d.click("Fun Tattoos file...")
+    yield d.dialog("WolvenKit")
+    yield d.click("Not now", d.dialogs("WolvenKit")[0])
+    yield d.pause(200)
+    no_msgs(n, "'Not now' before the Fun Tattoos file")
+
+    log("== damaged download (checksum)")
+    g.WK_URL = pathlib.Path(T["fakezip"]).as_uri()
+    yield d.click("WolvenKit...")
+    yield d.dialog("WolvenKit")
+    n = len(MSGS)
+    yield d.click("Yes, download it", d.dialogs("WolvenKit")[0])
+    yield d.idle(120)
+    expect(n, "error", "The WolvenKit download is damaged")
+    check(not os.listdir(os.path.dirname(g.WK_HOME)), "damaged download removed")
+
+    log("== I already have WolvenKit: wrong folder, cancel, the folder, a file in it")
+    for pick, what in (
+        (T["emptydir"], "wrong folder"),
+        ("", "cancel"),
+        (T["wkcopy"], "folder"),
+        (os.path.join(T["wkcopy"], "WolvenKit.Common.dll"), "a file in the folder"),
+    ):
+        yield d.click("WolvenKit...")
+        yield d.dialog("WolvenKit")
+        n = len(MSGS)
+        FILES.append(pick)
+        yield d.click("I already have WolvenKit", d.dialogs("WolvenKit")[0])
+        yield d.pause(300)
+        yield d.idle(300)
+        if what == "wrong folder":
+            expect(n, "error", "No WolvenKit found in")
+            check(not app.wk_path(), "wrong folder: not set")
+        elif what == "cancel":
+            no_msgs(n, "cancelled picker")
+        else:
+            no_msgs(n, "picked " + what)
+            own = os.path.join(g.WK_HOME, "WolvenKit.CLI.exe")
+            check(
+                app.wk_path() == own and app.wk_var.get() == g.WK_HOME,
+                "WolvenKit set from " + what,
+            )
+            check(
+                "Copying your WolvenKit from " + T["wkcopy"] in logtext(app),
+                "copied into our own folder",
+            )
+            mine, orig = (
+                os.path.join(x, "appsettings.json")
+                for x in (T["wkcopy"], os.path.dirname(os.path.abspath(a.wk)))
+            )
+            with open(mine, "rb") as f1, open(orig, "rb") as f2:
+                check(
+                    f1.read() == f2.read(),
+                    "the user's own WolvenKit settings are untouched",
+                )
+    check(
+        guide(app).startswith(
+            "Step 1: WolvenKit done     Step 2: Fun Tattoos file - click"
+        ),
+        "guide: step 2",
+    )
+    yield d.click("WolvenKit...")
+    yield d.dialog("WolvenKit")
+    yield d.click("Not now", d.dialogs("WolvenKit")[0])
+    yield d.pause(200)
+    check(
+        app.wk_path() == os.path.join(g.WK_HOME, "WolvenKit.CLI.exe"),
+        "'Not now' keeps it",
+    )
+    shutil.rmtree(g.WK_HOME)  # the real download below starts from nothing
+
+    log("== the real download from GitHub")
+    g.WK_URL = REAL_URL
+    yield d.click("WolvenKit...")
+    yield d.dialog("WolvenKit")
+    n = len(MSGS)
+    yield d.click("Yes, download it", d.dialogs("WolvenKit")[0])
+    seen = []
+    yield (
+        lambda: seen.append(app.status.cget("text")) or "%" in seen[-1] or not app.busy,
+        300,
+        "download progress",
+    )
+    log("  status while downloading: " + " / ".join(dict.fromkeys(seen)))
+    yield d.idle(900, "the download")
+    no_msgs(n, "real download")
+    own = os.path.join(g.WK_HOME, "WolvenKit.CLI.exe")
+    check(app.wk_path() == own, "downloaded WolvenKit set")
+    check(
+        "Download checked (checksum OK)" in logtext(app)
+        and "WolvenKit is ready." in logtext(app),
+        "checksum OK and it starts",
+    )
+    v = subprocess.run(
+        [own, "--version"],
+        capture_output=True,
+        text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    ).stdout.strip()
+    check(v.startswith(g.WK_VERSION), "downloaded WolvenKit reports %s" % v)
+    check(
+        sorted(os.listdir(os.path.dirname(g.WK_HOME))) == ["wolvenkit"],
+        "no download leftovers",
+    )
+    no_cli(d)
 
     log("== unexpected error in a callback -> log box + plain message")
     n = len(MSGS)
@@ -225,51 +394,33 @@ def session1(a, d):
     check("ZeroDivisionError" in logtext(app), "traceback is in the log box")
     a.expected_tracebacks += 1
 
-    log("== missing WolvenKit")
-    n = len(MSGS)
-    yield d.click("Build mod")
-    expect(n, "error", "WolvenKit is not set up yet")
-    n = len(MSGS)
-    FILES.append(a.fun)
-    yield d.click("Get templates...")
-    expect(n, "error", "WolvenKit is not set up yet")
-
-    log("== Find WolvenKit")
-    n = len(MSGS)
-    FILES.append(sys.executable)
-    yield d.click("Find WolvenKit...")
-    expect(n, "error", "Please pick WolvenKit.CLI.exe")
-    n = len(MSGS)
-    FILES.append("")  # cancel
-    yield d.click("Find WolvenKit...")
-    no_msgs(n, "cancelled picker")
-    FILES.append(a.wk.replace("\\", "/"))  # Tk pickers return forward slashes
-    yield d.click("Find WolvenKit...")
-    check(app.wk_var.get() == os.path.normpath(a.wk), "WolvenKit path shown")
-
     log("== Get templates: wrong inputs, then the real archive")
     n = len(MSGS)
     FILES.append(T["txt"])
-    yield d.click("Get templates...")
+    yield d.click("Fun Tattoos file...")
     yield d.idle()
     expect(n, "error", "Please pick the Fun Tattoos .archive file")
     n = len(MSGS)
     FILES.append(T["mod"])
-    yield d.click("Get templates...")
+    yield d.click("Fun Tattoos file...")
     yield d.idle()
     expect(n, "error", "doesn't look like the Fun Tattoos archive")
     n = len(MSGS)
     FILES.append(T["fakearchive"])
-    yield d.click("Get templates...")
+    yield d.click("Fun Tattoos file...")
     yield d.idle()
     expect(n, "error", "WolvenKit could not")
     n = len(MSGS)
     FILES.append(a.fun)
-    yield d.click("Get templates...")
+    yield d.click("Fun Tattoos file...")
     check(app.build_btn.instate(["disabled"]), "buttons disabled while a step runs")
     yield d.idle(600)
     no_msgs(n, "templates from the real archive")
     check(app.tpl_var.get() == "ready", "templates ready")
+    check(
+        guide(app).endswith("Step 3: Tattoos - add tattoos with the buttons below"),
+        "guide: step 3",
+    )
 
     log("== JSON folder")
     n = len(MSGS)
@@ -476,8 +627,8 @@ def session1(a, d):
 
     log("== Help")
     yield d.click("Help")
-    yield d.dialog("Tattoo Switchers - Help")
-    h = d.dialogs("Tattoo Switchers - Help")[0]
+    yield d.dialog("Tattoo Separator - Help")
+    h = d.dialogs("Tattoo Separator - Help")[0]
     text = d.find(tk.Text, top=h)[0].get("1.0", "end")
     for s in (
         "Steps, in order",
@@ -486,10 +637,15 @@ def session1(a, d):
         "only for a female V with the Angel body",
         "red line",
         "add, never remove",
+        "Yes, download it",
+        "I already have WolvenKit",
+        "Fun Tattoos file...",
+        "IMPORTANT: remove the original tattoo mods",
     ):
         check(s.lower() in text.lower(), "help mentions %r" % s)
+    check("CLI" not in text, "help never says CLI")
     yield d.click("Close", h)
-    yield d.gone("Tattoo Switchers - Help")
+    yield d.gone("Tattoo Separator - Help")
 
     log("== Install / Open folder before building")
     n = len(MSGS)
@@ -499,27 +655,36 @@ def session1(a, d):
     check(OPENED and OPENED[-1] == app.out, "Open folder opens the output folder")
 
     log("== Build (with the one-time game-file step)")
+    check(guide(app).endswith("Step 4: Build - click 'Build mod'"), "guide: step 4")
     real_oodle, g.OODLE = (
         g.OODLE,
-        os.path.join(a.base, "oodle test", "oo2ext_7_win64.dll"),
+        os.path.join(a.base, "oodle test Ä", "oo2ext_7_win64.dll"),
     )
     os.makedirs(os.path.dirname(g.OODLE), exist_ok=True)
+    real_find, g.find_game = g.find_game, lambda: None  # first: game not found -> asks
     try:
         n = len(MSGS)
         ANSWERS.append(False)
         yield d.click("Build mod")
-        expect(n, "askokcancel", "oo2ext_7_win64.dll")
+        expect(n, "askokcancel", "could not find your game by itself")
         check(not app.busy, "cancel: no build")
         n = len(MSGS)
         FILES.append(a.base)
         yield d.click("Build mod")
         expect(n, "error", "doesn't look like the Cyberpunk 2077 folder")
         check(not app.busy, "wrong folder: no build")
-        FILES.append(T["game"])
+        g.find_game = (
+            real_find  # now the real search finds the installed game (only read from)
+        )
+        game = g.find_game()
+        check(game and g.is_game_dir(game), "game found by itself: %s" % game)
+        n = len(MSGS)
         yield d.click("Build mod")
+        no_msgs(n, "game found: nothing asked")
         check(os.path.isfile(g.OODLE), "game file copied (to the test location)")
+        check(app.s.get("game") == game, "game folder remembered")
     finally:
-        g.OODLE = real_oodle
+        g.OODLE, g.find_game = real_oodle, real_find
     check(
         app.busy and app.build_btn.instate(["disabled"]),
         "building: Build button disabled",
@@ -533,6 +698,7 @@ def session1(a, d):
     n = len(MSGS)
     yield d.idle(1200, "the first build")
     expect(n, "info", "Your mod is ready")
+    expect(n, "info", "remove the original tattoo mods you took the designs from")
     check(
         all(r[3] == "in built mod" for r in rows(app)),
         "all tattoos marked 'in built mod'",
@@ -563,8 +729,25 @@ def session1(a, d):
     n = len(MSGS)
     FILES.append(T["game"])
     yield d.click("Install to game...")
-    expect(n, "info", "remove the tattoo mods")
+    expect(n, "info", "remove the original tattoo mods you took the designs from")
+    check(not [m for m in msgs_since(n) if m[0] == "warning"], "source mod not installed: not listed")
+    check(guide(app).endswith("Next: click 'Install to game...'"), "guide: install")
     mod = os.path.join(T["game"], "archive", "pc", "mod")
+    src_name = os.path.basename(T["mod"])
+    check(app.project.sources == [src_name], "tattoo mod remembered as a source: %s" % app.project.sources)
+
+    log("== Install while the source tattoo mod is still in the game (subfolder, other case)")
+    left = os.path.join(mod, "Unter Ordner", src_name.upper())
+    os.makedirs(os.path.dirname(left))
+    shutil.copy(T["mod"], left)
+    n = len(MSGS)
+    FILES.append(T["game"])
+    yield d.click("Install to game...")
+    expect(n, "warning", "These tattoo mods are still installed and will paint over your new tattoos")
+    expect(n, "warning", os.path.join("Unter Ordner", src_name.upper()))
+    expect(n, "warning", "Nothing was deleted")
+    check(os.path.isfile(left), "nothing deleted")
+    os.remove(left)
     check(
         os.path.isfile(os.path.join(mod, "tgui1_tattoos.archive"))
         and os.path.isfile(os.path.join(mod, "tgui1_tattoos.archive.xl")),
@@ -588,7 +771,7 @@ def session1(a, d):
     yield d.idle(1200, "the second build")
     expect(n, "info", "Your mod is ready")
     key = app.project.tattoos[-1]["key"]
-    listing = g.WolvenKit(a.wk, lambda m: None).listing(archive)
+    listing = g.WolvenKit(app.wk_path(), lambda m: None).listing(archive)
     check(any(key in l for l in listing), "new tattoo's texture is in the archive")
     check(all(r[3] == "in built mod" for r in rows(app)), "all built")
 
@@ -661,9 +844,17 @@ def session2(a, d):
         len(rows(app)) == a.built and all(r[3] == "in built mod" for r in rows(app)),
         "list reloaded",
     )
+    refit = os.path.dirname(g.REFITTER_WK[0])
+    check(app.tpl_var.get() == "ready", "Fun Tattoos file remembered")
+    yield d.pause(800)
+    check(not d.dialogs("WolvenKit"), "Outfit Refitter's WolvenKit: nothing asked")
     check(
-        app.tpl_var.get() == "ready" and app.wk_var.get() == os.path.normpath(a.wk),
-        "setup remembered",
+        app.wk_var.get() == refit and app.wk_path() == g.REFITTER_WK[0],
+        "Outfit Refitter's WolvenKit used",
+    )
+    check(
+        "Using the WolvenKit that Outfit Refitter downloaded" in logtext(app),
+        "log says so",
     )
     check(app.alpha_lbl.cget("text") == "0.80", "ink remembered")
     log("== Install right after a restart (no rebuild)")
@@ -671,13 +862,63 @@ def session2(a, d):
     FILES.append(a.t["game"])
     yield d.click("Install to game...")
     expect(n, "info", "Copied both files")
-    log("== WolvenKit gone missing")
+    log("== WolvenKit gone missing (and no other copy) -> asked again")
     app.s["wolvenkit"] = os.path.join(a.base, "gone", "WolvenKit.CLI.exe")
+    real_refit, g.REFITTER_WK = g.REFITTER_WK, []
     n = len(MSGS)
     yield d.click("Build mod")
-    expect(n, "error", "WolvenKit is not set up yet")
-    app.s["wolvenkit"] = os.path.normpath(a.wk)
+    yield d.dialog("WolvenKit")
+    yield d.click("Not now", d.dialogs("WolvenKit")[0])
+    yield d.pause(200)
+    no_msgs(n, "'Not now'")
+    check(not app.busy, "no build")
+    g.REFITTER_WK = real_refit
+    app.s["wolvenkit"] = g.REFITTER_WK[0]
     check("Traceback" not in logtext(app), "no tracebacks in the log box")
+    d.root.tk.call(d.root.protocol("WM_DELETE_WINDOW"))
+
+
+def slow_server():
+    """A local server that sends a big download slowly (a fast line could finish GitHub's before the close)."""
+    import http.server
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(200 << 20))
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                for _ in range(200):
+                    self.wfile.write(b"x" * (1 << 20))
+                    time.sleep(0.2)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    srv.handle_error = lambda *a: None
+    threading.Thread(target=srv.serve_forever, name="slowserver", daemon=True).start()
+    return "http://127.0.0.1:%d/WolvenKit.zip" % srv.server_address[1]
+
+
+def session_close_download(a, d):
+    """Separate process: start the WolvenKit download, then close the window."""
+    app = d.app
+    yield d.click("WolvenKit...")
+    yield d.dialog("WolvenKit")
+    yield d.click("Yes, download it", d.dialogs("WolvenKit")[0])
+    yield (lambda: "%" in app.status.cget("text"), 300, "download progress")
+    a.workers = [
+        t for t in threading.enumerate() if "(_work)" in t.name
+    ]  # the download thread
+    check(len(a.workers) == 1, "one download thread running")
+    n = len(MSGS)
+    ANSWERS.append(False)
+    d.root.tk.call(d.root.protocol("WM_DELETE_WINDOW"))
+    expect(n, "askyesno", "A step is still running")
+    check(d.root.winfo_exists(), "'No' keeps the window")
+    log("closing during the download")
     d.root.tk.call(d.root.protocol("WM_DELETE_WINDOW"))
 
 
@@ -740,6 +981,11 @@ def make_inputs(a):
     im.save(t["body"])
     t["emptydir"] = os.path.join(inp, "leerer Ordner")
     os.makedirs(t["emptydir"], exist_ok=True)
+    t["fakezip"] = os.path.join(inp, "kaputt WolvenKit.zip")
+    with open(t["fakezip"], "wb") as f:
+        f.write(b"not the real WolvenKit " * 50)
+    t["wkcopy"] = os.path.join(b, "Mein WolvenKit Ä")  # "I already have WolvenKit"
+    shutil.copytree(os.path.dirname(os.path.abspath(a.wk)), t["wkcopy"])
     t["game"] = os.path.join(b, "fake game Ä", "Cyberpunk 2077")
     os.makedirs(os.path.join(t["game"], "archive", "pc"), exist_ok=True)
     os.makedirs(os.path.join(t["game"], "bin", "x64"), exist_ok=True)
@@ -763,6 +1009,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--guitest")
     ap.add_argument("--guitest-close")
+    ap.add_argument("--during", default="build")
     ap.add_argument("--fun")
     ap.add_argument("--mod")
     ap.add_argument("--xbm")
@@ -786,18 +1033,59 @@ def main():
     g.USER = os.path.join(a.base, "app folder Ä")
     g.SETTINGS = os.path.join(g.USER, "gui_settings.json")
     os.makedirs(g.USER, exist_ok=True)
+    # %LOCALAPPDATA% stand-in: our WolvenKit download and Outfit Refitter's copy live here
+    local = os.path.join(a.base, "Local AppData Ä")
+    g.WK_HOME = os.path.join(local, "TattooSeparator", "wolvenkit")
+    g.REFITTER_WK = [
+        os.path.join(local, n, "wolvenkit", "WolvenKit.CLI.exe")
+        for n in ("OutfitRefitter", "BodyRefitter")
+    ]
+    if closing and a.during == "download":
+        g.WK_HOME = os.path.join(local, "close test", "wolvenkit")
+        g.WK_URL = slow_server()
+    os.makedirs(os.path.dirname(g.WK_HOME), exist_ok=True)
     patch_dialogs()
     a.expected_tracebacks = 0
     ok = True
     try:
+        if not closing:
+            log("== renamed from Tattoo Switchers: old folders are taken over")
+            r = os.path.join(a.base, "rename Ä")
+            old, new = os.path.join(r, "Local", "TattooSwitcher"), os.path.join(r, "Local", "TattooSeparator")
+            os.makedirs(os.path.join(old, "wolvenkit"))
+            check(g.move_old_folder(old, new) == new and os.path.isdir(os.path.join(new, "wolvenkit"))
+                  and not os.path.exists(old), "%LOCALAPPDATA% folder moved once")
+            check(g.move_old_folder(old, new) == new, "second start: nothing to move")
+            old, new = os.path.join(r, "Desktop", "TattooSwitcher"), os.path.join(r, "Desktop", "TattooSeparator")
+            os.makedirs(os.path.join(old, "work", "mytat"))
+            os.makedirs(new)
+            for f in ("gui_settings.json", os.path.join("work", "mytat", "list.json")):
+                with open(os.path.join(old, f), "w") as fh:
+                    fh.write("{}")
+            check(g.take_over_old_list(new) and os.path.isfile(os.path.join(new, "work", "mytat", "list.json"))
+                  and os.path.isfile(os.path.join(new, "gui_settings.json"))
+                  and os.path.isfile(os.path.join(old, "gui_settings.json")), "old exe folder's list copied over")
+            check(not g.take_over_old_list(new), "copied only once")
         if closing:
             with open(os.path.join(a.base, "inputs.json"), encoding="utf-8") as f:
                 a.t = json.load(f)
-            ok = run_session(a, session_close)
-            log(
-                "window closed; WolvenKit still running: %d"
-                % sum(p.poll() is None for p in g.RUNNING)
-            )
+            if a.during == "download":
+                ok = run_session(a, session_close_download)
+                workers = getattr(a, "workers", [])
+                for t in workers:
+                    t.join(30)
+                left = os.listdir(os.path.dirname(g.WK_HOME))
+                log(
+                    "window closed; download stopped: %s; left behind: %s"
+                    % (bool(workers) and not any(t.is_alive() for t in workers), left)
+                )
+                ok = ok and left == []
+            else:
+                ok = run_session(a, session_close)
+                log(
+                    "window closed; WolvenKit still running: %d"
+                    % sum(p.poll() is None for p in g.RUNNING)
+                )
         else:
             if os.path.exists(g.SETTINGS):
                 raise SystemExit("use an empty scratch dir")
@@ -805,20 +1093,29 @@ def main():
             with open(os.path.join(a.base, "inputs.json"), "w", encoding="utf-8") as f:
                 json.dump(a.t, f)
             ok = run_session(a, session1)
-            if ok:
+            if ok:  # restart with only Outfit Refitter's copy: our download moved there, setting forgotten
+                os.makedirs(
+                    os.path.dirname(os.path.dirname(g.REFITTER_WK[0])), exist_ok=True
+                )
+                shutil.move(g.WK_HOME, os.path.dirname(g.REFITTER_WK[0]))
+                s = g.load_settings()
+                del s["wolvenkit"]
+                g.save_settings(s)
                 with open(
                     os.path.join(g.USER, "work", "tgui1", "list.json"), encoding="utf-8"
                 ) as f:
                     a.built = len(json.load(f)["tattoos"])
                 ok = run_session(a, session2)
-            if ok:
-                log("== closing the window during a build (separate process)")
+            for during in ("download", "build"):
+                if not ok:
+                    break
+                log("== closing the window during the %s (separate process)" % during)
                 cmd = [sys.executable] + (
                     []
                     if getattr(sys, "frozen", False)
                     else [os.path.abspath(g.__file__)]
                 )
-                cmd += ["--guitest-close", a.base, "--wk", a.wk]
+                cmd += ["--guitest-close", a.base, "--wk", a.wk, "--during", during]
                 r = subprocess.run(
                     cmd,
                     stdin=subprocess.DEVNULL,
@@ -835,10 +1132,16 @@ def main():
                 log("  child log:\n    " + child.strip().replace("\n", "\n    "))
                 log("  child exit code %d, output %r" % (r.returncode, out))
                 ok = r.returncode == 0 and not out.strip() and "FAIL" not in child
-                ok = ok and "STDERR" not in child and "still running: 0" in child
+                ok = ok and "STDERR" not in child and "Traceback" not in child
+                ok = ok and (
+                    "still running: 0" in child
+                    if during == "build"
+                    else "download stopped: True; left behind: []" in child
+                )
                 if not ok:
                     FAILS.append(
-                        "closing during a build: exit %d %r" % (r.returncode, out)
+                        "closing during the %s: exit %d %r"
+                        % (during, r.returncode, out)
                     )
     except Exception:
         log("FAIL:\n" + traceback.format_exc())

@@ -1,4 +1,4 @@
-# Tattoo Switchers for Cyberpunk 2077
+# Tattoo Separator for Cyberpunk 2077
 
 Pick your body tattoos in the character editor (the mirror), the same way you pick a hairstyle.
 Each body part gets its own setting, and you can change them whenever you like.
@@ -7,29 +7,47 @@ This repo contains a small program with a window (the GUI), the build script beh
 instructions. It contains **no tattoo pictures and no game files**. You bring the tattoos: your
 own pictures, or tattoos from mods you have downloaded.
 
+> [!IMPORTANT]
+> **After installing your built tattoo mod, remove the original tattoo mods you took the designs
+> from** (e.g. a full-body tattoo mod). Otherwise they keep painting the tattoo onto the skin, even
+> when the row is set to *Off*. The GUI reminds you and lists the ones it still finds in your game.
+
 ---
 
 ## Easy way: the GUI
 
 You don't need to know any programming for this, and you don't need Python. You need the things
-from [section 4](#4-what-you-need): WolvenKit, ArchiveXL and the Fun Tattoos download.
+from [section 4](#4-what-you-need): ArchiveXL and the Fun Tattoos download. WolvenKit (a free
+modding tool) is set up by the GUI itself.
 Sections 1 to 3 explain what the mod does, if you're curious.
 
-The window has a **Help** button (bottom right) that shows these same steps in short, so you
-don't need to keep this page open.
+The line at the top of the window always tells you the next step, for example
+*Step 1: WolvenKit done     Step 2: Fun Tattoos file - click 'Fun Tattoos file...'*.
+The **Help** button (bottom right) shows these same steps in short, so you don't need to keep this
+page open.
 
-1. **Start it.** Download `TattooSwitcher.zip` from the
-   [Releases page](https://github.com/jj-repository/cp2077-tattoo-switchers/releases), unzip it
-   anywhere (for example on your Desktop), and double-click `TattooSwitcher.exe`.
+1. **Start it.** Download `TattooSeparator.zip` from the
+   [Releases page](https://github.com/jj-repository/cp2077-tattoo-separator/releases), unzip it
+   anywhere (for example on your Desktop), and double-click `TattooSeparator.exe`.
    If Windows says *"Windows protected your PC"*, click *More info*, then *Run anyway*. It shows
    that for any small program that isn't signed by a company.
 
    *Alternative with Python:* if you have Python and Pillow (see section 4), you can download this
    repo instead and double-click `Start GUI.bat`. It's the same program.
-2. **Find WolvenKit (once).** Click *Find WolvenKit...* and pick `WolvenKit.CLI.exe`. That's the
-   console version of WolvenKit (download "WolvenKit Console" from the WolvenKit GitHub page if you
-   only have the normal one). The GUI remembers it.
-3. **Get the templates (once).** Click *Get templates...* and pick `fun_tattoos_angel_funsix.archive`
+2. **WolvenKit (once).** The GUI needs [WolvenKit](https://github.com/WolvenKit/WolvenKit), a free
+   modding tool. On the first start it asks *"Download it now automatically?"*. Click
+   *Yes, download it*: it downloads WolvenKit 9.1.1 (about 45 MB) from
+   [WolvenKit's official GitHub page](https://github.com/WolvenKit/WolvenKit/releases/tag/9.1.1),
+   checks the file and keeps it in `%LOCALAPPDATA%\TattooSeparator\wolvenkit\`.
+   - If you use the [Outfit Refitter](https://github.com/jj-repository/cp2077-outfit-refitter), its WolvenKit is used
+     and nothing is asked.
+   - If you already have WolvenKit, click *I already have WolvenKit* and pick the WolvenKit program
+     or any file in your WolvenKit folder. The GUI finds the part it needs and copies it into its
+     own folder (your WolvenKit stays as it is).
+   - *WolvenKit...* (top right) changes it later.
+   - WolvenKit needs the free [Microsoft .NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
+     If it's missing, the GUI tells you.
+3. **Fun Tattoos file (once).** Click *Fun Tattoos file...* and pick `fun_tattoos_angel_funsix.archive`
    from the [Fun Tattoos](https://www.nexusmods.com/cyberpunk2077/mods/33230) download
    (the "Fun Tattoos Angel Body" file). The GUI takes out the parts it needs by itself.
 4. **Name your mod.** Type a short name in *Mod name*, for example `mytat` (lowercase letters,
@@ -53,12 +71,13 @@ don't need to keep this page open.
    `.archive` (a bit less for simple designs, more for big detailed ones). Ten tattoos make a mod
    of roughly 50 MB.
 
-   The first time, the GUI may ask for your `Cyberpunk 2077` folder. WolvenKit needs one file from
-   the game (`oo2ext_7_win64.dll`) to pack pictures correctly. The GUI copies it into your user
-   folder. Nothing in the game is changed.
+   The first time, WolvenKit needs one file from the game (`oo2ext_7_win64.dll`) to pack pictures
+   correctly. The GUI finds your game by itself and copies the file into your user folder (it asks
+   for your `Cyberpunk 2077` folder only if it can't find the game). Nothing in the game is changed.
 7. **Install.** Click *Install to game...* and pick your `Cyberpunk 2077` folder, or copy both
    files into `Cyberpunk 2077\archive\pc\mod\` yourself. **Then remove the tattoo mods you took the
-   designs from** (see step 6 of the manual way for why).
+   designs from** (see the box at the top). After installing, the GUI lists the ones it still finds
+   in `archive\pc\mod` (it never deletes anything itself).
 
 > **Important: you can add tattoos later, but you can't remove or move tattoos you already built.**
 > The game saves your choice as a number ("3rd entry"). If an entry disappeared, old saves would
@@ -66,9 +85,9 @@ don't need to keep this page open.
 > rename them. New tattoos always go to the end of the list.
 
 If something goes wrong, the GUI tells you what's missing, and the box at the bottom shows what it
-did. Your list is kept in `work\<mod name>\` (next to `TattooSwitcher.exe`) and comes back when
+did. Your list is kept in `work\<mod name>\` (next to `TattooSeparator.exe`) and comes back when
 you start the GUI again. If you unzipped it into a folder Windows doesn't let it write to (like
-`Program Files`), the `work` and `output` folders go to `%LOCALAPPDATA%\TattooSwitcher\` instead.
+`Program Files`), the `work` and `output` folders go to `%LOCALAPPDATA%\TattooSeparator\` instead.
 
 ---
 
@@ -152,8 +171,9 @@ still don't replace each other (details in section 6).
 - Cyberpunk 2077 with [ArchiveXL](https://www.nexusmods.com/cyberpunk2077/mods/4198). ArchiveXL is
   what lets mods add new settings to the character editor.
 - [WolvenKit](https://github.com/WolvenKit/WolvenKit), the standard modding tool for packing
-  game files.
-- Only for `Start GUI.bat` or the manual way (not for `TattooSwitcher.exe`): Python 3.8 or newer
+  game files. The GUI downloads it for you; for the manual way you need the "WolvenKit Console"
+  download.
+- Only for `Start GUI.bat` or the manual way (not for `TattooSeparator.exe`): Python 3.8 or newer
   ([python.org](https://www.python.org/), tick *Add python.exe to PATH* when installing). For the
   GUI and `tools/split_overlay.py` you also need Pillow: open a command prompt and type
   `pip install pillow`.
@@ -320,12 +340,12 @@ people's designs unless they allow it.
 
 ## License
 
-To build `TattooSwitcher.exe` yourself, run `build_exe.bat` (needs Python; the result is in
-`dist\TattooSwitcher\`). `tattoo_switcher_gui.py --guitest ...` (or `TattooSwitcher.exe --guitest ...`)
+To build `TattooSeparator.exe` yourself, run `build_exe.bat` (needs Python; the result is in
+`dist\TattooSeparator\`). `tattoo_separator_gui.py --guitest ...` (or `TattooSeparator.exe --guitest ...`)
 clicks through every button of the real window and writes `guitest.log`; the arguments are listed
 at the top of `guitest.py`.
 
-The code in this repo (`build.py`, `tattoo_switcher_gui.py`, `guitest.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
+The code in this repo (`build.py`, `tattoo_separator_gui.py`, `guitest.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
 does not cover Fun Tattoos' files, game files or tattoo pictures.
 
 by jj-repository

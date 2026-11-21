@@ -16,3 +16,8 @@ tmp/
 packed/
 output/
 __pycache__/
+# Windows .exe build (build_exe.bat)
+.venv/
+dist/
+pyi_build/
+*.spec

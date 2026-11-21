@@ -4,17 +4,25 @@ Pick your body tattoos in the character editor (the mirror), the same way you pi
 Each body part gets its own setting, and you can change them whenever you like.
 
 This repo contains a small program with a window (the GUI), the build script behind it, and these
-instructions. It contains **no tattoo pictures and no game files**.
+instructions. It contains **no tattoo pictures and no game files**. You bring the tattoos: your
+own pictures, or tattoos from mods you have downloaded.
 
 ---
 
 ## Easy way: the GUI
 
-You don't need to know any programming for this. You need the things from
-[section 4](#4-what-you-need): Python, Pillow, WolvenKit, ArchiveXL and the Fun Tattoos download.
+You don't need to know any programming for this, and you don't need Python. You need the things
+from [section 4](#4-what-you-need): WolvenKit, ArchiveXL and the Fun Tattoos download.
 Sections 1 to 3 explain what the mod does, if you're curious.
 
-1. **Start it.** Double-click `Start GUI.bat`.
+1. **Start it.** Download `TattooSwitcher.zip` from the
+   [Releases page](https://github.com/jj-repository/cp2077-tattoo-switchers/releases), unzip it
+   anywhere (for example on your Desktop), and double-click `TattooSwitcher.exe`.
+   If Windows says *"Windows protected your PC"*, click *More info*, then *Run anyway*. It shows
+   that for any small program that isn't signed by a company.
+
+   *Alternative with Python:* if you have Python and Pillow (see section 4), you can download this
+   repo instead and double-click `Start GUI.bat`. It's the same program.
 2. **Find WolvenKit (once).** Click *Find WolvenKit...* and pick `WolvenKit.CLI.exe`. That's the
    console version of WolvenKit (download "WolvenKit Console" from the WolvenKit GitHub page if you
    only have the normal one). The GUI remembers it.
@@ -36,6 +44,11 @@ Sections 1 to 3 explain what the mod does, if you're curious.
    - `<mod name>_tattoos.archive`
    - `<mod name>_tattoos.archive.xl`
 
+   **How big is the mod?** That depends only on your tattoos. Each tattoo you added as a PNG
+   picture (also each Torso / Legs / Chest piece of a split picture) adds about 5 MB to the
+   `.archive` (a bit less for simple designs, more for big detailed ones). Ten tattoos make a mod
+   of roughly 50 MB.
+
    The first time, the GUI may ask for your `Cyberpunk 2077` folder. WolvenKit needs one file from
    the game (`oo2ext_7_win64.dll`) to pack pictures correctly. The GUI copies it into your user
    folder. Nothing in the game is changed.
@@ -49,7 +62,9 @@ Sections 1 to 3 explain what the mod does, if you're curious.
 > rename them. New tattoos always go to the end of the list.
 
 If something goes wrong, the GUI tells you what's missing, and the box at the bottom shows what it
-did. Your list is kept in `work\<mod name>\` and comes back when you start the GUI again.
+did. Your list is kept in `work\<mod name>\` (next to `TattooSwitcher.exe`) and comes back when
+you start the GUI again. If you unzipped it into a folder Windows doesn't let it write to (like
+`Program Files`), the `work` and `output` folders go to `%LOCALAPPDATA%\TattooSwitcher\` instead.
 
 ---
 
@@ -134,9 +149,10 @@ still don't replace each other (details in section 6).
   what lets mods add new settings to the character editor.
 - [WolvenKit](https://github.com/WolvenKit/WolvenKit), the standard modding tool for packing
   game files.
-- Python 3.8 or newer ([python.org](https://www.python.org/), tick *Add python.exe to PATH* when
-  installing). For the GUI and `tools/split_overlay.py` you also need Pillow: open a command
-  prompt and type `pip install pillow`.
+- Only for `Start GUI.bat` or the manual way (not for `TattooSwitcher.exe`): Python 3.8 or newer
+  ([python.org](https://www.python.org/), tick *Add python.exe to PATH* when installing). For the
+  GUI and `tools/split_overlay.py` you also need Pillow: open a command prompt and type
+  `pip install pillow`.
 - [Fun Tattoos](https://www.nexusmods.com/cyberpunk2077/mods/33230), for the templates (see
   section 3).
 - A **female V with the Angel body**. The templates are made for that body. On another body the
@@ -299,6 +315,9 @@ from mods whose authors allow reuse (and credit them), or your own. Don't upload
 people's designs unless they allow it.
 
 ## License
+
+To build `TattooSwitcher.exe` yourself, run `build_exe.bat` (needs Python; the result is in
+`dist\TattooSwitcher\`).
 
 The code in this repo (`build.py`, `tattoo_switcher_gui.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
 does not cover Fun Tattoos' files, game files or tattoo pictures.

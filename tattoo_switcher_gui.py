@@ -3,17 +3,51 @@
 Start it with "Start GUI.bat" (or: python tattoo_switcher_gui.py). Everything the README's
 "Manual way" does by hand runs here through the WolvenKit CLI and build.py.
 
+Windows .exe (build_exe.bat, PyInstaller): the same file frozen. Settings and the work and output
+folders then live next to TattooSwitcher.exe, or in %LOCALAPPDATA%/TattooSwitcher if that folder is
+read-only.
+
 Self-test without a window (needs the Fun Tattoos archive and some tattoo sources):
   python tattoo_switcher_gui.py --selftest <empty scratch dir> --fun <Fun Tattoos Angel .archive>
       --arm <arm tattoo mod .archive or .xbm> --png <arm tattoo .png> --body <full-body mod .archive / v_overlay .xbm / .png>
       [--wk <WolvenKit.CLI.exe>]
+  (TattooSwitcher.exe --selftest ... works too; the windowed exe has no console, so it writes
+  selftest.log into the scratch dir and exits 0 / 1.)
 """
 
 import contextlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, traceback
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+VERSION = "1.1"
+HERE = os.path.dirname(
+    os.path.abspath(__file__)
+)  # bundled files (frozen: PyInstaller's _internal)
 sys.path[:0] = [HERE, os.path.join(HERE, "tools")]
 import build as tsbuild  # noqa: E402  (build.py next to this file)
+
+
+def _user_dir():
+    """Where settings, work and output go: this folder, or next to the .exe when frozen."""
+    if not getattr(sys, "frozen", False):
+        return HERE
+    for d in (
+        os.path.dirname(sys.executable),
+        os.path.join(
+            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "TattooSwitcher"
+        ),
+    ):
+        # really try to write: os.access lies on Windows, and tempfile retries forever on a denied folder
+        test = os.path.join(d, ".write_test")
+        try:
+            os.makedirs(d, exist_ok=True)
+            open(test, "w").close()
+            os.remove(test)
+            return d
+        except OSError:
+            pass
+    raise SystemExit("No writable folder for Tattoo Switchers' settings.")
+
+
+USER = _user_dir()
 
 try:
     from PIL import Image
@@ -21,7 +55,7 @@ try:
 except ImportError:  # shown as a message box / console line in main()
     Image = None
 
-SETTINGS = os.path.join(HERE, "gui_settings.json")
+SETTINGS = os.path.join(USER, "gui_settings.json")
 OODLE = os.path.join(os.environ.get("LOCALAPPDATA", ""), "oo2ext_7_win64.dll")
 
 # The 8 Fun Tattoos files build.py copies, plus one texture per layer used as the base when a PNG
@@ -104,6 +138,7 @@ class WolvenKit:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                stdin=subprocess.DEVNULL,  # the windowed .exe has no stdin handle to inherit
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as e:
@@ -379,9 +414,13 @@ class Project:
         work = os.path.join(self.dir, "build")
         jdir = os.path.join(work, "json")
         log("Writing the mod files (build.py) ...")
-        buf = io.StringIO()  # build.py prints a long file list; only its summary line goes to the log
+        buf = (
+            io.StringIO()
+        )  # build.py prints a long file list; only its summary line goes to the log
         try:
-            tsbuild.check_order(cfg, {p["id"]: p for p in PARTS}, self.options()["options"])  # before wiping work
+            tsbuild.check_order(
+                cfg, {p["id"]: p for p in PARTS}, self.options()["options"]
+            )  # before wiping work
             shutil.rmtree(work, ignore_errors=True)
             with contextlib.redirect_stdout(buf):
                 xl, textures = tsbuild.build(tdir, jdir, cfg)
@@ -606,11 +645,11 @@ def run_gui():
             self.s = load_settings()
             self.q = queue.Queue()
             self.busy = False
-            self.tdir = os.path.join(HERE, "work", "templates")
-            self.out = os.path.join(HERE, "output")
+            self.tdir = os.path.join(USER, "work", "templates")
+            self.out = os.path.join(USER, "output")
             self.last = None  # files of the last build
             self.thumbs = {}
-            root.title("Tattoo Switchers")
+            root.title("Tattoo Switchers %s" % VERSION)
 
             setup = ttk.LabelFrame(root, text="1. Setup (once)")
             setup.pack(fill="x", padx=8, pady=(8, 4))
@@ -663,9 +702,7 @@ def run_gui():
             ).pack(side="left", padx=4)
             self.alpha_lbl = ttk.Label(sett, width=5)
             self.alpha_lbl.pack(side="left")
-            ttk.Label(
-                sett, text="(1.0 full colour, 0.6 faded)"
-            ).pack(side="left")
+            ttk.Label(sett, text="(1.0 full colour, 0.6 faded)").pack(side="left")
 
             lst = ttk.LabelFrame(root, text="3. Tattoos")
             lst.pack(fill="both", expand=True, padx=8, pady=4)
@@ -860,7 +897,7 @@ def run_gui():
             prefix = self.prefix_var.get().strip()
             if self.project and prefix == self.project.prefix:
                 return
-            p = self.guard(Project, HERE, prefix)
+            p = self.guard(Project, USER, prefix)
             if p is None:
                 if self.project:
                     self.prefix_var.set(self.project.prefix)
@@ -1271,7 +1308,21 @@ def main():
         for o in ("--selftest", "--fun", "--arm", "--png", "--body"):
             ap.add_argument(o, required=True)
         ap.add_argument("--wk")
-        selftest(ap.parse_args())
+        a = ap.parse_args()
+        if sys.stdout is None:  # windowed .exe: no console, so log to a file
+            os.makedirs(a.selftest, exist_ok=True)
+            sys.stdout = sys.stderr = open(
+                os.path.join(a.selftest, "selftest.log"),
+                "w",
+                encoding="utf-8",
+                buffering=1,
+            )
+        try:
+            selftest(a)
+        except BaseException:
+            traceback.print_exc()
+            print("SELFTEST FAILED")
+            sys.exit(1)
     else:
         run_gui()
 

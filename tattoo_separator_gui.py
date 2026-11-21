@@ -21,10 +21,10 @@ GUI test (drives the real window, every button; see guitest.py):
 Threads: workers get only the queue and plain values (task -> _work). Never touch Tk from them.
 """
 
-import contextlib, glob, hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading
-import traceback, urllib.request, zipfile
+import collections, contextlib, filecmp, glob, hashlib, io, json, os, platform, queue, re, shutil, subprocess
+import sys, tempfile, threading, time, traceback, urllib.request, zipfile
 
-VERSION = "1.2"
+VERSION = "1.3"
 HERE = os.path.dirname(
     os.path.abspath(__file__)
 )  # bundled files (frozen: PyInstaller's _internal)
@@ -45,7 +45,12 @@ def move_old_folder(old, new):
     return new
 
 
-DATA = move_old_folder(os.path.join(LOCAL, "TattooSwitcher"), os.path.join(LOCAL, "TattooSeparator"))
+DATA = move_old_folder(
+    os.path.join(LOCAL, "TattooSwitcher"), os.path.join(LOCAL, "TattooSeparator")
+)
+SESSION_FILE = os.path.join(
+    DATA, "last_session.txt"
+)  # the last session, for the support report
 
 
 def take_over_old_list(user):
@@ -58,7 +63,9 @@ def take_over_old_list(user):
         return False
     for n in ("work", "output"):
         if os.path.isdir(os.path.join(old, n)):
-            shutil.copytree(os.path.join(old, n), os.path.join(user, n), dirs_exist_ok=True)
+            shutil.copytree(
+                os.path.join(old, n), os.path.join(user, n), dirs_exist_ok=True
+            )
     shutil.copy(os.path.join(old, "gui_settings.json"), user)
     return True
 
@@ -369,7 +376,9 @@ def download_wolvenkit(home, url, log, progress):
 def copy_wolvenkit(exe, home, log):
     """A WolvenKit the user already has -> copied into home (their own copy and its settings stay untouched)."""
     src = os.path.dirname(exe)
-    if os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(home)):
+    if os.path.normcase(os.path.abspath(src)) != os.path.normcase(
+        os.path.abspath(home)
+    ):
         log("Copying your WolvenKit from %s ..." % src)
         shutil.rmtree(home, ignore_errors=True)
         shutil.copytree(src, home)
@@ -381,9 +390,14 @@ def finish_wolvenkit(home, log):
     exe = os.path.join(home, "WolvenKit.CLI.exe")
     with open(os.path.join(home, "appsettings.json"), "w", encoding="utf-8") as f:
         json.dump(WK_APPSETTINGS, f, indent=1)
-    v = WolvenKit(exe, log).run("--version").strip()  # starts? (else: plain .NET message)
+    v = (
+        WolvenKit(exe, log).run("--version").strip()
+    )  # starts? (else: plain .NET message)
     if not v.startswith(WK_VERSION):
-        log("Note: this WolvenKit is version %s; this program is tested with %s." % (v[:20], WK_VERSION))
+        log(
+            "Note: this WolvenKit is version %s; this program is tested with %s."
+            % (v[:20], WK_VERSION)
+        )
     log("WolvenKit is ready.")
     return exe
 
@@ -586,7 +600,11 @@ class Project:
         os.makedirs(self.tex, exist_ok=True)
         with open(os.path.join(self.dir, "list.json"), "w", encoding="utf-8") as f:
             json.dump(
-                {"diffuse_alpha": self.alpha, "tattoos": self.tattoos, "sources": self.sources},
+                {
+                    "diffuse_alpha": self.alpha,
+                    "tattoos": self.tattoos,
+                    "sources": self.sources,
+                },
                 f,
                 indent=1,
             )
@@ -609,8 +627,9 @@ class Project:
             else None
         )
 
-    def add(self, label, part, src=None, image=None, preview=None):
-        """src = .png/.xbm file to copy, or image = PIL image to save as PNG. Returns the new row."""
+    def add(self, label, part, src=None, image=None, preview=None, origin=None):
+        """src = .png/.xbm file to copy, or image = PIL image to save as PNG. Returns the new row.
+        origin = file name the design came from (shown in the support report)."""
         label = label.strip()
         if not label:
             raise UserError("Please give the tattoo a name.")
@@ -630,6 +649,8 @@ class Project:
                 src
             )  # checks it, and RGBA PNGs are what WolvenKit imports
         t = {"key": key, "label": label, "part": part, "file": key + ext}
+        if origin:
+            t["source"] = origin
         if image is not None:
             image.save(self.file(t))
         else:
@@ -855,6 +876,351 @@ def prepare_source(wk, path, tmp):
     raise UserError("Please pick a .png, an .xbm or a tattoo mod's .archive.")
 
 
+# ----------------------------------------------------------------------------- support report
+class Session:
+    """What happened in this window (clicks, choices, log lines, errors, messages), for the support
+    report. Locked, so any thread may add; only kept in memory and in SESSION_FILE."""
+
+    MAX = 5000  # ponytail: oldest lines dropped beyond this; plenty for one session
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.lines = collections.deque(maxlen=self.MAX)
+        self.dropped = 0
+        self.started = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def add(self, kind, text):
+        line = "%s  %-7s %s" % (time.strftime("%H:%M:%S"), kind, str(text)[:20000])
+        with self.lock:
+            self.dropped += len(self.lines) == self.MAX
+            self.lines.append(line)
+
+    def text(self):
+        with self.lock:
+            head = "Session started %s (Tattoo Separator %s)" % (self.started, VERSION)
+            if self.dropped:
+                head += ", %d older lines dropped" % self.dropped
+            return "\n".join([head, *self.lines])
+
+    def save(self):
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
+            with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                f.write(self.text())
+
+
+def read_previous_session():
+    try:
+        with open(SESSION_FILE, encoding="utf-8", errors="replace") as f:
+            return f.read()[-500000:]
+    except OSError:
+        return ""
+
+
+def redact(text, profile, user):
+    """The Windows user name (and the profile folder's name) -> <user>, everywhere."""
+    for n in {user, os.path.basename(profile.rstrip("\\/"))} - {"", None}:
+        e = re.escape(n)
+        text = re.sub(
+            r"(?i)(?<=[\\/])%s(?=[\\/]|$|[^A-Za-z0-9])" % e, "<user>", text
+        )  # in paths
+        if len(n) >= 3:  # also as a word (short names would hit normal words)
+            text = re.sub(r"(?i)(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % e, "<user>", text)
+        text = re.sub(
+            r"(?i)(?<=[\\/])%s~\d" % re.escape(n[:6]), "<user>~", text
+        )  # 8.3 short path
+    return text
+
+
+def file_version(path):
+    """Windows file version of an .exe / .dll ('1.2.3.4'), or None."""
+    try:
+        import ctypes
+
+        v = ctypes.windll.version
+        n = v.GetFileVersionInfoSizeW(path, None)
+        if not n:
+            return None
+        buf = ctypes.create_string_buffer(n)
+        if not v.GetFileVersionInfoW(path, 0, n, buf):
+            return None
+        p, ln = ctypes.c_void_p(), ctypes.c_uint()
+        if (
+            not v.VerQueryValueW(buf, "\\", ctypes.byref(p), ctypes.byref(ln))
+            or ln.value < 16
+        ):
+            return None
+        ms, ls = ctypes.cast(p, ctypes.POINTER(ctypes.c_uint32 * 4)).contents[
+            2:4
+        ]  # VS_FIXEDFILEINFO
+        return "%d.%d.%d.%d" % (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
+    except Exception:
+        return None
+
+
+def _size(p):
+    st = os.stat(p)
+    return "{:,} bytes, changed {}".format(
+        st.st_size, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+    )
+
+
+REPORT_CAP = 3_000_000  # characters
+
+
+def support_report(info):
+    """Plain values from the window (App.report_info) -> the report text. Never raises: a part that
+    can't be checked says so in the report. Reads file names and sizes only, never file contents."""
+    out = []
+    w = out.append
+    s, prefix = info["settings"], info["prefix"]
+
+    def section(title, fn):
+        w("\n" + title + "\n" + "=" * len(title))
+        try:
+            fn()
+        except Exception as e:
+            w("(could not check this part: %s: %s)" % (type(e).__name__, e))
+
+    def about():
+        w("Tattoo Separator %s" % VERSION)
+        w("Windows: %s" % platform.platform())
+        w(
+            "Running as: "
+            + (
+                "TattooSeparator.exe"
+                if info["frozen"]
+                else "Python source (Python %s)" % sys.version.split()[0]
+            )
+        )
+        w("Report made: %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        w("Data folder (settings, work, output): %s" % info["user"])
+        w("App data folder: %s" % info["data"])
+
+    def setup():
+        wk = info["wk"]
+        w("WolvenKit: %s" % (wk or "not set"))
+        if wk:
+            w("  version: %s" % (file_version(wk) or "unknown"))
+        miss = templates_missing(info["tdir"])
+        w(
+            "Fun Tattoos file: "
+            + (
+                "set, all %d template parts extracted" % len(TEMPLATES)
+                if not miss
+                else "not set"
+                if len(miss) == len(TEMPLATES)
+                else "incomplete, missing: " + ", ".join(miss)
+            )
+        )
+        base = sorted(
+            n
+            for n in set(BASE_XBM.values())
+            if not os.path.isfile(os.path.join(info["tdir"], n))
+        )
+        w(
+            "  base textures for PNG tattoos: "
+            + ("present" if not base else "missing: " + ", ".join(base))
+        )
+        w("Game folder (remembered): %s" % (s.get("game") or "not set"))
+        w(
+            "oo2ext_7_win64.dll (needed by WolvenKit): %s"
+            % ("present" if os.path.isfile(info["oodle"]) else "missing")
+        )
+
+    def mod():
+        if not prefix:
+            return w("No mod loaded.")
+        w("Mod name: %s" % prefix)
+        w("Ink strength: %.2f" % info["alpha"])
+        locked = set(info["locked"])
+        w("Tattoos (%d):" % len(info["tattoos"]))
+        for i, t in enumerate(info["tattoos"], 1):
+            w(
+                "  %d. %s | %s | source: %s | picture: %s | %s"
+                % (
+                    i,
+                    t.get("label"),
+                    PART_NAME.get(t.get("part"), t.get("part")),
+                    t.get("source") or "(not recorded)",
+                    t.get("file"),
+                    "in built mod" if t.get("key") in locked else "new",
+                )
+            )
+        lock = os.path.join(info["project_dir"], "options.lock.json")
+        try:
+            with open(lock, encoding="utf-8") as f:
+                n = sum(len(v) for v in json.load(f).values())
+            w("Lock file (options.lock.json): present, %d tattoos locked" % n)
+        except FileNotFoundError:
+            w("Lock file (options.lock.json): not there (never built)")
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            w("Lock file (options.lock.json): DAMAGED (%s)" % e)
+        w("Last build in this session: %s" % (info["last_build"] or "none"))
+        w("Output folder: %s" % info["out"])
+        for n in info["outputs"]:
+            p = os.path.join(info["out"], n)
+            w("  %s: %s" % (n, _size(p) if os.path.isfile(p) else "missing"))
+        w(
+            "Original tattoo mods the designs came from: %s"
+            % (", ".join(info["sources"]) or "none recorded")
+        )
+
+    def session():
+        w("--- This session ---")
+        w(info["session"])
+        w("\n--- Previous session ---")
+        w(info["previous"].strip() or "(none recorded)")
+
+    def game():
+        g = (
+            s.get("game")
+            if s.get("game") and os.path.isdir(s.get("game"))
+            else find_game()
+        )
+        w("Game folder: %s" % (g or "NOT FOUND"))
+        if not g:
+            return
+        w(
+            "Cyberpunk2077.exe: %s"
+            % ("present" if is_game_dir(g) else "MISSING (wrong folder?)")
+        )
+        for name, rel in (
+            ("ArchiveXL", r"red4ext\plugins\ArchiveXL\ArchiveXL.dll"),
+            ("RED4ext", r"red4ext\RED4ext.dll"),
+        ):
+            p = os.path.join(g, rel)
+            v = os.path.isfile(p) and file_version(p)
+            w(
+                "%s (%s): %s"
+                % (
+                    name,
+                    rel,
+                    ("present, version %s" % v if v else "present")
+                    if os.path.isfile(p)
+                    else "MISSING",
+                )
+            )
+        modd = os.path.join(g, "archive", "pc", "mod")
+        files = sorted(
+            os.path.relpath(os.path.join(d, f), modd)
+            for d, _, fs in os.walk(modd)
+            for f in fs
+        )
+        w(r"archive\pc\mod: %d files" % len(files))
+        base = lambda r: os.path.basename(r).lower()  # noqa: E731
+        angel = [
+            r for r in files if re.search(r"angel.?body.?mod|hyst.?angel", base(r))
+        ]
+        w(
+            "Angel body archive: "
+            + (
+                "found: " + ", ".join(angel)
+                if angel
+                else "not found by file name (looked for names like 05_Hyst_Angel_BodyMod.archive)"
+            )
+        )
+        ours = {n.lower() for n in info["outputs"]}
+        for n in info["outputs"]:
+            hits = [r for r in files if base(r) == n.lower()]
+            if not hits:
+                w("Your built %s: NOT INSTALLED" % n)
+            src = os.path.join(info["out"], n)
+            for r in hits:
+                same = os.path.isfile(src) and filecmp.cmp(
+                    src, os.path.join(modd, r), shallow=False
+                )
+                w(
+                    r"Your built %s: installed (archive\pc\mod\%s), %s"
+                    % (
+                        n,
+                        r,
+                        "same as the output folder file"
+                        if same
+                        else "DIFFERENT from the output folder file (install again?)",
+                    )
+                )
+        srcs = {n.lower() for n in info["sources"]}
+        left = [r for r in files if base(r) in srcs]
+        w(
+            "Original tattoo mods still installed: "
+            + (
+                ", ".join(left)
+                if left
+                else "none"
+                if srcs
+                else "none recorded to check"
+            )
+        )
+        fun = [
+            r for r in files if base(r).startswith("fun_tattoos") or "funsix" in base(r)
+        ]
+        w(
+            "Fun Tattoos in the game: "
+            + (
+                "yes: %s (not needed for your built mod; it may add its own tattoo rows)"
+                % ", ".join(fun)
+                if fun
+                else "no"
+            )
+        )
+        other = [
+            r
+            for r in files
+            if re.search(r"tat+o+|overlay", base(r))
+            and base(r) not in ours | srcs
+            and r not in fun
+        ]
+        w(
+            "Other mods that may change tattoos or skin overlays (by file name only, not looked inside): "
+            + (
+                ", ".join(other[:50])
+                + (" ... and %d more" % (len(other) - 50) if len(other) > 50 else "")
+                if other
+                else "none"
+            )
+        )
+
+    w("Tattoo Separator support report")
+    w(
+        "Plain text. Your Windows user name is replaced by <user>. No file contents are included."
+    )
+    section("1. Program", about)
+    section("2. Setup", setup)
+    section("3. Current mod", mod)
+    section("4. What happened (log)", session)
+    section("5. Game folder check", game)
+    text = redact("\n".join(out), info["profile"], info["username"])
+    if len(text) > REPORT_CAP:
+        text = text[:REPORT_CAP] + "\n\n(report cut: too long)"
+    return text
+
+
+def write_support_report(info):
+    """-> path of the written report: the output folder, else the app data folder, else TEMP."""
+    text = support_report(info)
+    name = time.strftime("TattooSeparator_support_%Y-%m-%d_%H%M%S.txt")
+    err = None
+    for d in (info["out"], info["data"], tempfile.gettempdir()):
+        try:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, name)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text)
+            return p
+        except OSError as e:
+            err = e
+    raise UserError("Could not save the support report (%s)." % err)
+
+
+def show_in_explorer(path):
+    """Open the file's folder with the file selected."""
+    try:
+        subprocess.Popen('explorer /select,"%s"' % path)
+    except OSError:
+        os.startfile(os.path.dirname(path))
+
+
 # ----------------------------------------------------------------------------- self-test
 def selftest(a):
     base = os.path.abspath(a.selftest)
@@ -986,6 +1352,9 @@ Good to know
 - Your list is kept and comes back when you start the program again.
 - A different mod name starts a separate mod with its own list.
 - The box at the bottom of the window shows what the program did. If something goes wrong, a message tells you what to do.
+
+Having a problem?
+Click 'Support report...' (bottom right). It saves one text file in the output folder and shows it. Send that file to the mod author. It lists what you clicked, what the program did, the error messages, your setup and which needed mods it finds in your game. Your Windows user name is replaced by <user>, and no files are included. You can open it first to see what's inside.
 """
 
 
@@ -993,19 +1362,62 @@ def run_gui(setup=None):
     """Open the window. setup(root, app), if given, runs before the main loop (used by --guitest)."""
     import gc
     import tkinter as tk
-    from tkinter import filedialog, messagebox, simpledialog, ttk
+    import tkinter.filedialog, tkinter.messagebox, tkinter.simpledialog
+    from tkinter import ttk
     from PIL import ImageDraw, ImageTk
+
+    rec = Session()  # everything below goes in here, for the support report
+
+    class Recorded:
+        """tkinter's messagebox / filedialog / simpledialog: every box's text and answer is recorded.
+        Looked up at call time, so the GUI test's stand-ins are used too."""
+
+        def __init__(self, mod):
+            self.mod = mod
+
+        def __getattr__(self, name):
+            def call(*a, **kw):
+                title = kw.get("title", a[0] if a else "")
+                text = kw.get("message", kw.get("prompt", a[1] if len(a) > 1 else ""))
+                rec.add(
+                    "box",
+                    "%s [%s] %s" % (name, title, (text or "").replace("\n", " | ")),
+                )
+                r = getattr(self.mod, name)(*a, **kw)
+                if name.startswith("ask"):
+                    rec.add("answer", r if isinstance(r, str) and r else repr(r))
+                return r
+
+            return call
+
+    filedialog, messagebox, simpledialog = map(
+        Recorded, (tkinter.filedialog, tkinter.messagebox, tkinter.simpledialog)
+    )
+
+    def Button(parent, text, command, **kw):
+        """ttk.Button whose clicks are recorded."""
+
+        def run():
+            rec.add("click", text)
+            return command()
+
+        return ttk.Button(parent, text=text, command=run, **kw)
 
     class App:
         def __init__(self, root):
             self.root = root
+            self.rec = rec
+            self.previous = read_previous_session()
             self.s = load_settings()
             self.q = queue.Queue()
             q = self.q
             # the only logger handed to worker threads: it holds the queue, nothing from Tk
             self.qlog = lambda msg: q.put(("log", msg))
-            self.busy = self.loading = False
+            self.busy = self.loading = self.reporting = False
             self.on_done = None
+            self.task_label = ""
+            self.last_build = None
+            self.ink_after = None
             self.tdir = os.path.join(USER, "work", "templates")
             self.out = os.path.join(USER, "output")
             self.thumbs = {}
@@ -1015,7 +1427,7 @@ def run_gui(setup=None):
             root.protocol("WM_DELETE_WINDOW", self.close)
 
             def button(parent, text, cmd):
-                b = ttk.Button(parent, text=text, command=cmd)
+                b = Button(parent, text=text, command=cmd)
                 self.actions.append(b)
                 return b
 
@@ -1128,11 +1540,15 @@ def run_gui(setup=None):
             act.pack(fill="x", padx=8, pady=4)
             self.build_btn = button(act, "Build mod", self.build)
             self.build_btn.pack(side="left")
-            ttk.Button(act, text="Open folder", command=self.open_folder).pack(
+            Button(act, text="Open folder", command=self.open_folder).pack(
                 side="left", padx=4
             )
             button(act, "Install to game...", self.install).pack(side="left")
-            ttk.Button(act, text="Help", command=self.show_help).pack(side="right")
+            Button(act, text="Help", command=self.show_help).pack(side="right")
+            # not in self.actions: usable while a step runs (a stuck step is when it's needed most)
+            Button(act, text="Support report...", command=self.support_report).pack(
+                side="right", padx=4
+            )
             self.status = ttk.Label(act, text="")
             self.status.pack(side="left", padx=10)
 
@@ -1152,6 +1568,7 @@ def run_gui(setup=None):
             self.q.put(("log", msg))
 
         def write_log(self, msg):
+            self.rec.add("log", msg)
             self.logbox.configure(state="normal")
             self.logbox.insert("end", msg + "\n")
             self.logbox.see("end")
@@ -1166,6 +1583,9 @@ def run_gui(setup=None):
                     if kind == "log":
                         self.write_log(val)
                         continue
+                    if kind == "report":  # the support report thread (not a task)
+                        self.report_done(val)
+                        continue
                     if kind == "progress":
                         self.status.configure(
                             text="Downloading WolvenKit %d%% ..." % (val * 100)
@@ -1173,6 +1593,14 @@ def run_gui(setup=None):
                         continue
                     done, self.on_done = self.on_done, None
                     self.set_busy(False)
+                    label = self.task_label
+                    self.rec.add(
+                        "step",
+                        "%s: %s" % (label, "failed" if kind == "error" else "finished"),
+                    )
+                    if kind == "error" and label == "Building":
+                        self.last_build = "FAILED: " + val.splitlines()[0]
+                        self.rec.save()
                     if kind == "error":
                         messagebox.showerror("Tattoo Separator", val)
                     elif done:
@@ -1182,6 +1610,7 @@ def run_gui(setup=None):
 
         def callback_error(self, exc, val, tb):
             """Any unexpected error in a button or timer: details in the log box, a plain message."""
+            self.rec.add("error", "unexpected: %s: %s" % (exc.__name__, val))
             self.write_log("".join(traceback.format_exception(exc, val, tb)))
             messagebox.showerror(
                 "Tattoo Separator",
@@ -1204,7 +1633,8 @@ def run_gui(setup=None):
                     "Busy", "Please wait until the current step is finished."
                 )
                 return
-            self.on_done = done
+            self.on_done, self.task_label = done, label
+            self.rec.add("step", label + " started")
             self.set_busy(True, label)
             threading.Thread(target=_work, args=(self.q, fn), daemon=True).start()
 
@@ -1239,6 +1669,8 @@ def run_gui(setup=None):
             ):
                 return
             stop_running()
+            self.rec.add("action", "window closed")
+            self.rec.save()
             self.root.destroy()
 
         # ---- setup
@@ -1345,7 +1777,7 @@ def run_gui(setup=None):
                 ("I already have WolvenKit", "pick"),
                 ("Not now", None),
             ):
-                ttk.Button(
+                Button(
                     bb, text=label, command=lambda c=c: (choice.append(c), d.destroy())
                 ).pack(side="left", padx=(6, 0))
             d.grab_set()
@@ -1456,6 +1888,9 @@ def run_gui(setup=None):
                     p.sources = list(self.project.sources)
                 p.save()
             self.project = p
+            self.rec.add(
+                "action", "mod name: %s (%d tattoos)" % (prefix, len(p.tattoos))
+            )
             self.s["prefix"] = prefix
             save_settings(self.s)
             self.alpha_var.set(p.alpha)
@@ -1469,6 +1904,12 @@ def run_gui(setup=None):
             if self.project and not self.busy:
                 self.project.alpha = v
                 self.project.save()
+                # dragging calls this for every step: record where it stops
+                if self.ink_after:
+                    self.root.after_cancel(self.ink_after)
+                self.ink_after = self.root.after(
+                    500, lambda: self.rec.add("action", "ink strength: %.2f" % v)
+                )
 
         def refresh_list(self, select=None):
             self.tree.delete(*self.tree.get_children())
@@ -1552,7 +1993,8 @@ def run_gui(setup=None):
                 "Reading " + os.path.basename(p),
                 lambda: prepare_source(wk, p, tmp),
                 lambda items: self.offer(
-                    [(s, pv, "full" if full else r, n) for s, pv, r, n in items], source=p
+                    [(s, pv, "full" if full else r, n) for s, pv, r, n in items],
+                    source=p,
                 ),
             )
 
@@ -1588,19 +2030,22 @@ def run_gui(setup=None):
             remembered when a design from it was added (to warn if it's still installed)."""
             count = len(self.project.tattoos)
             for src, prev, row, name in items:
+                origin = os.path.basename(source or src)
                 if row == "full":
-                    self.split_dialog(prev, name)
+                    self.split_dialog(prev, name, origin)
                 else:
-                    self.add_dialog(src, prev, row, name)
+                    self.add_dialog(src, prev, row, name, origin)
             if source and source.lower().endswith(".archive"):
                 # split pieces are added by a worker afterwards: busy = a split dialog was confirmed
                 name = os.path.basename(source)
-                if (len(self.project.tattoos) > count or self.busy) and name not in self.project.sources:
+                if (
+                    len(self.project.tattoos) > count or self.busy
+                ) and name not in self.project.sources:
                     self.project.sources.append(name)
                     self.project.save()
             self.refresh_list()
 
-        def add_dialog(self, src, prev, row, name):
+        def add_dialog(self, src, prev, row, name, origin):
             try:
                 img = ImageTk.PhotoImage(self.thumb(prev, 200)) if prev else None
             except UserError as e:
@@ -1632,7 +2077,7 @@ def run_gui(setup=None):
             def ok():
                 if pv.get().startswith("Full body"):
                     d.destroy()
-                    return self.split_dialog(prev, nv.get())
+                    return self.split_dialog(prev, nv.get(), origin)
                 part = next((k for k, v in PART_NAME.items() if v == pv.get()), None)
                 is_png = src.lower().endswith(".png")
                 t = self.guard(
@@ -1642,18 +2087,24 @@ def run_gui(setup=None):
                     src,
                     None,
                     None if is_png else prev,
+                    origin,
                 )
                 if t:
+                    self.rec.add(
+                        "action",
+                        "add tattoo: '%s' as %s from %s"
+                        % (t["label"], PART_NAME[part], origin),
+                    )
                     self.log("Added '%s' (%s)." % (t["label"], PART_NAME[part]))
                     d.destroy()
 
             bb = ttk.Frame(d)
             bb.grid(row=3, column=1, columnspan=2, sticky="e", padx=4, pady=8)
-            ttk.Button(bb, text="Add", command=ok).pack(side="left", padx=4)
-            ttk.Button(bb, text="Cancel", command=d.destroy).pack(side="left")
+            Button(bb, text="Add", command=ok).pack(side="left", padx=4)
+            Button(bb, text="Cancel", command=d.destroy).pack(side="left")
             self.root.wait_window(d)
 
-        def split_dialog(self, png, name):
+        def split_dialog(self, png, name, origin):
             try:
                 small = self.thumb(png, 300)
             except UserError as e:
@@ -1729,9 +2180,17 @@ def run_gui(setup=None):
                     )
                 s = round(sv.get(), 2)
                 d.destroy()
+                self.rec.add(
+                    "action",
+                    "split: '%s' from %s, cut at %.2f, parts: %s"
+                    % (label, origin, s, ", ".join(PART_NAME[p] for p in parts)),
+                )
 
                 def added(pieces):  # back on the window's thread
-                    ts = [self.project.add(label, p, image=pieces[p]) for p in parts]
+                    ts = [
+                        self.project.add(label, p, image=pieces[p], origin=origin)
+                        for p in parts
+                    ]
                     self.log(
                         "Added '%s' as %s."
                         % (label, ", ".join(PART_NAME[t["part"]] for t in ts))
@@ -1748,8 +2207,8 @@ def run_gui(setup=None):
             draw()
             bb = ttk.Frame(d)
             bb.pack(anchor="e", padx=8, pady=(0, 8))
-            ttk.Button(bb, text="Add", command=ok).pack(side="left", padx=4)
-            ttk.Button(bb, text="Cancel", command=d.destroy).pack(side="left")
+            Button(bb, text="Add", command=ok).pack(side="left", padx=4)
+            Button(bb, text="Cancel", command=d.destroy).pack(side="left")
             self.root.wait_window(d)
 
         def rename(self):
@@ -1763,7 +2222,9 @@ def run_gui(setup=None):
             n = simpledialog.askstring(
                 "Rename", "New name in game:", initialvalue=t["label"], parent=self.root
             )
+            old = t["label"]
             if n is not None and self.guard(self.project.rename, t["key"], n) is None:
+                self.rec.add("action", "rename: '%s' -> '%s'" % (old, t["label"]))
                 self.refresh_list(t["key"])
 
         def remove(self):
@@ -1778,6 +2239,11 @@ def run_gui(setup=None):
                 "Remove", "Remove '%s' from the list?" % t["label"]
             ):
                 return
+            self.rec.add(
+                "action",
+                "remove: '%s' (%s, source %s)"
+                % (t["label"], PART_NAME[t["part"]], t.get("source") or "not recorded"),
+            )
             self.guard(self.project.remove, t["key"])
             self.refresh_list()
 
@@ -1796,12 +2262,83 @@ def run_gui(setup=None):
             )
             sb = ttk.Scrollbar(w, command=t.yview)
             t.configure(yscrollcommand=sb.set)
-            ttk.Button(w, text="Close", command=w.destroy).pack(side="bottom", pady=6)
+            Button(w, text="Close", command=w.destroy).pack(side="bottom", pady=6)
             sb.pack(side="right", fill="y")
             t.pack(fill="both", expand=True)
             t.insert("end", HELP_TEXT)
             t["state"] = "disabled"
             return w
+
+        # ---- support report
+        def report_info(self):
+            """Plain values for the report thread (nothing from Tk)."""
+            p = self.project
+            prof = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+            try:
+                locked = sorted(p.locked()) if p else []
+            except (OSError, ValueError, TypeError, AttributeError):
+                locked = []  # damaged lock file: the report's mod part says so
+            return {
+                "frozen": bool(getattr(sys, "frozen", False)),
+                "user": USER,
+                "data": DATA,
+                "settings": dict(self.s),
+                "wk": self.wk_path(),
+                "tdir": self.tdir,
+                "oodle": OODLE,
+                "out": self.out,
+                "prefix": p.prefix if p else None,
+                "alpha": p.alpha if p else 1.0,
+                "tattoos": [dict(t) for t in p.tattoos] if p else [],
+                "locked": locked,
+                "sources": list(p.sources) if p else [],
+                "project_dir": p.dir if p else "",
+                "outputs": [
+                    p.prefix + "_tattoos.archive",
+                    p.prefix + "_tattoos.archive.xl",
+                ]
+                if p
+                else [],
+                "last_build": self.last_build,
+                "session": self.rec.text(),
+                "previous": self.previous,
+                "profile": prof,
+                "username": os.environ.get("USERNAME") or os.path.basename(prof),
+            }
+
+        def support_report(self):
+            if self.reporting:
+                return
+            info = self.report_info()
+            self.reporting = True
+            q = self.q
+
+            def work():
+                try:
+                    q.put(("report", ("ok", write_support_report(info))))
+                except Exception as e:
+                    q.put(("report", ("error", "%s: %s" % (type(e).__name__, e))))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def report_done(self, res):
+            self.reporting = False
+            kind, val = res
+            if kind == "error":
+                self.rec.add("error", "support report: " + val)
+                return messagebox.showerror(
+                    "Tattoo Separator", "Could not write the support report:\n%s" % val
+                )
+            self.rec.add("action", "support report saved: " + os.path.basename(val))
+            try:
+                show_in_explorer(val)
+            except Exception as e:
+                self.rec.add("error", "could not open Explorer: %s" % e)
+            messagebox.showinfo(
+                "Support report",
+                "Saved. Send this file to the mod author. You can open it first to see what's inside.\n\n"
+                + val,
+            )
 
         # ---- build / install
         def built(self):
@@ -1852,6 +2389,9 @@ def run_gui(setup=None):
             p, tdir, out, log = self.project, self.tdir, self.out, self.qlog
 
             def done(res):
+                self.last_build = "OK: " + ", ".join(map(os.path.basename, res))
+                self.rec.add("action", "build finished: " + self.last_build)
+                self.rec.save()
                 self.refresh_list()
                 self.log(
                     "Done: %s and %s are in %s" % (*map(os.path.basename, res), out)
@@ -1863,6 +2403,11 @@ def run_gui(setup=None):
                 )
 
             self.log("Building %s_tattoos ..." % p.prefix)
+            self.rec.add(
+                "action",
+                "build started: %s, %d tattoos, ink %.2f"
+                % (p.prefix, len(p.tattoos), p.alpha),
+            )
             self.task("Building", lambda: p.build(wk, tdir, out, log), done)
 
         def open_folder(self):
@@ -1895,6 +2440,12 @@ def run_gui(setup=None):
                 save_settings(self.s)
                 self.log("Installed into " + mod)
                 left = still_installed(os.path.normpath(g), self.project.sources)
+                self.rec.add(
+                    "action",
+                    "installed into %s; original tattoo mods still there: %s"
+                    % (mod, ", ".join(left) or "none"),
+                )
+                self.rec.save()
                 if left:
                     self.log("Still installed: " + ", ".join(left))
                     messagebox.showwarning(
@@ -1904,7 +2455,10 @@ def run_gui(setup=None):
                         % (mod, "\n  ".join(left)),
                     )
                 else:
-                    messagebox.showinfo("Installed", "Copied both files into\n%s\n\n%s" % (mod, REMOVE_OLD))
+                    messagebox.showinfo(
+                        "Installed",
+                        "Copied both files into\n%s\n\n%s" % (mod, REMOVE_OLD),
+                    )
 
     try:  # sharp text on scaled Windows displays
         import ctypes

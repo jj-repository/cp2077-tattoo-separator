@@ -15,7 +15,7 @@ dialogs are filled in through their widgets, builds are awaited through the wind
 Installs go into a fake game folder inside the scratch dir. Writes <scratch>/guitest.log, exits 0 / 1.
 """
 
-import argparse, contextlib, io, json, os, pathlib, shutil, subprocess, sys, threading, time, traceback
+import argparse, contextlib, io, json, os, pathlib, re, shutil, subprocess, sys, threading, time, traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -28,6 +28,7 @@ FILES = []  # what the next file / folder picker returns
 ANSWERS = []  # what the next yes/no box returns (default: yes)
 NAMES = []  # what the next rename box returns
 OPENED = []  # os.startfile calls
+SHOWN = []  # files shown in Explorer (support reports)
 FAILS = []
 
 
@@ -81,6 +82,7 @@ def patch_dialogs():
 
     simpledialog.askstring = ask
     os.startfile = lambda p: OPENED.append(p)
+    g.show_in_explorer = lambda p: SHOWN.append(p)
 
 
 # ----------------------------------------------------------------------------- driver
@@ -246,7 +248,7 @@ def session1(a, d):
         and "Download it now automatically?" in ask,
         "asks to download",
     )
-    check(d.root.title() == "Tattoo Separator 1.2", "window title %r" % d.root.title())
+    check(d.root.title() == "Tattoo Separator 1.3", "window title %r" % d.root.title())
     check(app.wk_var.get().startswith("not set"), "WolvenKit shows 'not set'")
     check(app.tpl_var.get().startswith("not set"), "Fun Tattoos file shows 'not set'")
     check(
@@ -641,6 +643,8 @@ def session1(a, d):
         "I already have WolvenKit",
         "Fun Tattoos file...",
         "IMPORTANT: remove the original tattoo mods",
+        "Having a problem?",
+        "Support report...",
     ):
         check(s.lower() in text.lower(), "help mentions %r" % s)
     check("CLI" not in text, "help never says CLI")
@@ -730,23 +734,145 @@ def session1(a, d):
     FILES.append(T["game"])
     yield d.click("Install to game...")
     expect(n, "info", "remove the original tattoo mods you took the designs from")
-    check(not [m for m in msgs_since(n) if m[0] == "warning"], "source mod not installed: not listed")
+    check(
+        not [m for m in msgs_since(n) if m[0] == "warning"],
+        "source mod not installed: not listed",
+    )
     check(guide(app).endswith("Next: click 'Install to game...'"), "guide: install")
     mod = os.path.join(T["game"], "archive", "pc", "mod")
     src_name = os.path.basename(T["mod"])
-    check(app.project.sources == [src_name], "tattoo mod remembered as a source: %s" % app.project.sources)
+    check(
+        app.project.sources == [src_name],
+        "tattoo mod remembered as a source: %s" % app.project.sources,
+    )
 
-    log("== Install while the source tattoo mod is still in the game (subfolder, other case)")
+    log(
+        "== Install while the source tattoo mod is still in the game (subfolder, other case)"
+    )
     left = os.path.join(mod, "Unter Ordner", src_name.upper())
     os.makedirs(os.path.dirname(left))
     shutil.copy(T["mod"], left)
     n = len(MSGS)
     FILES.append(T["game"])
     yield d.click("Install to game...")
-    expect(n, "warning", "These tattoo mods are still installed and will paint over your new tattoos")
+    expect(
+        n,
+        "warning",
+        "These tattoo mods are still installed and will paint over your new tattoos",
+    )
     expect(n, "warning", os.path.join("Unter Ordner", src_name.upper()))
     expect(n, "warning", "Nothing was deleted")
     check(os.path.isfile(left), "nothing deleted")
+
+    log(
+        "== Support report (fake game without ArchiveXL, original tattoo mod still installed)"
+    )
+    text = yield from support_report(a, d)
+    has(
+        text,
+        [
+            "1. Program",
+            "2. Setup",
+            "3. Current mod",
+            "4. What happened (log)",
+            "5. Game folder check",
+            "Tattoo Separator 1.3",
+            "Running as: "
+            + (
+                "TattooSeparator.exe"
+                if getattr(sys, "frozen", False)
+                else "Python source"
+            ),
+            "Windows: Windows-",
+            "  version: " + g.WK_VERSION,
+            "Fun Tattoos file: set, all %d template parts extracted" % len(g.TEMPLATES),
+            "base textures for PNG tattoos: present",
+            "oo2ext_7_win64.dll (needed by WolvenKit): present",
+            "Mod name: tgui1",
+            "Ink strength: 0.80",
+            "Arm Renamed | Left Arm | source: Arm Tätowierung.png | picture: arm_t_towierung_left_arm.png | in built mod",
+            "Mod Left | Left Arm | source: Full Body Tätowierung mod.archive",
+            "Full Body Tätowierung Mod | Torso | source: Full Body Tätowierung mod.archive",
+            "Full Body Tätowierung Mod | Legs | source: Full Body Tätowierung mod.archive",
+            "| Right Arm | source: femme_arm_right_01_overlay.xbm",
+            "Lock file (options.lock.json): present, %d tattoos locked"
+            % len(app.project.tattoos),
+            "Last build in this session: OK: tgui1_tattoos.archive, tgui1_tattoos.archive.xl",
+            "tgui1_tattoos.archive: ",
+            "tgui1_tattoos.archive.xl: ",
+            "Original tattoo mods the designs came from: Full Body Tätowierung mod.archive",
+            # actions
+            "click   Not now",
+            "click   Yes, download it",
+            "click   I already have WolvenKit",
+            "click   Fun Tattoos file...",
+            "click   JSON folder...",
+            "fun_tattoos_angel_funsix.archive",
+            "mod name: tgui1",
+            "ink strength: 0.80",
+            "add tattoo: 'Arm Tätowierung' as Left Arm from Arm Tätowierung.png",
+            "add tattoo: 'Mod Left' as Left Arm from Full Body Tätowierung mod.archive",
+            "split: 'Full Body Tätowierung Mod' from Full Body Tätowierung mod.archive, cut at 0.62, parts: Torso, Legs",
+            "split: 'Ganzkörper' from Ganzkörper.png, cut at 0.59, parts: Torso",
+            "click   Cancel",
+            "rename: 'Arm Tätowierung' -> 'Arm Renamed'",
+            "remove: 'Ganzkörper' (Torso, source Ganzkörper.png)",
+            "click   Help",
+            "click   Open folder",
+            "click   Install to game...",
+            "click   Build mod",
+            "build started: tgui1",
+            "build finished: OK: tgui1_tattoos.archive",
+            "installed into",
+            "original tattoo mods still there: Unter Ordner",
+            # log lines, errors, message boxes
+            "Checked: all",
+            "WolvenKit is ready.",
+            "unexpected: ZeroDivisionError",
+            "ZeroDivisionError: division by zero",
+            "showerror [Tattoo Separator] Please pick the Fun Tattoos .archive file",
+            "showerror [Tattoo Separator] Could not download WolvenKit",
+            "askyesno [Remove] Remove '",
+            "answer  False",
+            "--- Previous session ---\n(none recorded)",
+            # game folder
+            "Cyberpunk2077.exe: present",
+            r"ArchiveXL (red4ext\plugins\ArchiveXL\ArchiveXL.dll): MISSING",
+            r"RED4ext (red4ext\RED4ext.dll): MISSING",
+            "Angel body archive: not found by file name",
+            r"Your built tgui1_tattoos.archive: installed (archive\pc\mod\tgui1_tattoos.archive), same as the output folder file",
+            r"Your built tgui1_tattoos.archive.xl: installed (archive\pc\mod\tgui1_tattoos.archive.xl), same as",
+            "Original tattoo mods still installed: "
+            + os.path.join("Unter Ordner", src_name.upper()),
+            "Fun Tattoos in the game: no",
+            "Other mods that may change tattoos or skin overlays (by file name only, not looked inside): none",
+        ],
+    )
+    check(
+        text.index("1. Program")
+        < text.index("2. Setup")
+        < text.index("3. Current mod")
+        < text.index("4. What happened")
+        < text.index("5. Game folder check"),
+        "sections in order",
+    )
+    info = app.report_info()
+    info["tdir"] = None  # a part that fails: the report says so and goes on
+    broken = g.support_report(info)
+    has(
+        broken,
+        [
+            "(could not check this part: TypeError",
+            "Mod name: tgui1",
+            "Cyberpunk2077.exe: present",
+        ],
+    )
+    check(
+        broken.index("2. Setup")
+        < broken.index("(could not check this part")
+        < broken.index("3. Current mod"),
+        "the failed part is reported inside its section, the rest goes on",
+    )
     os.remove(left)
     check(
         os.path.isfile(os.path.join(mod, "tgui1_tattoos.archive"))
@@ -875,7 +1001,104 @@ def session2(a, d):
     g.REFITTER_WK = real_refit
     app.s["wolvenkit"] = g.REFITTER_WK[0]
     check("Traceback" not in logtext(app), "no tracebacks in the log box")
+
+    log(
+        "== Support report after a restart (fake game with ArchiveXL, original tattoo mod removed)"
+    )
+    game = a.t["game"]
+    for rel in (
+        r"red4ext\plugins\ArchiveXL\ArchiveXL.dll",
+        r"red4ext\RED4ext.dll",
+        r"archive\pc\mod\05_Hyst_Angel_BodyMod.archive",
+        r"archive\pc\mod\fun_tattoos_angel_funsix.archive",
+        r"archive\pc\mod\Sub Folder\Some Tattoo Overlay.archive",
+    ):
+        os.makedirs(os.path.dirname(os.path.join(game, rel)), exist_ok=True)
+        open(os.path.join(game, rel), "wb").close()
+    dll = os.path.join(
+        os.environ["SystemRoot"], "System32", "version.dll"
+    )  # any DLL with a version
+    shutil.copy(dll, os.path.join(game, r"red4ext\plugins\ArchiveXL\ArchiveXL.dll"))
+    text = yield from support_report(a, d)
+    cur, prev = text.split("--- Previous session ---")
+    has(
+        text,
+        [
+            r"ArchiveXL (red4ext\plugins\ArchiveXL\ArchiveXL.dll): present, version "
+            + str(g.file_version(dll)),
+            r"RED4ext (red4ext\RED4ext.dll): present",
+            "Angel body archive: found: 05_Hyst_Angel_BodyMod.archive",
+            "Original tattoo mods still installed: none",
+            "Fun Tattoos in the game: yes: fun_tattoos_angel_funsix.archive (not needed",
+            "by file name only, not looked inside): "
+            + os.path.join("Sub Folder", "Some Tattoo Overlay.archive"),
+            r"Your built tgui1_tattoos.archive: installed (archive\pc\mod\tgui1_tattoos.archive), same as the output folder file",
+            "Last build in this session: none",
+            "Using the WolvenKit that Outfit Refitter downloaded",
+        ],
+    )
+    check(g.file_version(dll), "a DLL version is read")
+    has(
+        prev,
+        [
+            "rename: 'Arm Tätowierung' -> 'Arm Renamed'",
+            "build finished: OK",
+            "ZeroDivisionError",
+            "window closed",
+            "Session started",
+        ],
+    )
+    check(
+        "rename: " not in cur and "click   Not now" in cur,
+        "this session and the previous one are kept apart",
+    )
     d.root.tk.call(d.root.protocol("WM_DELETE_WINDOW"))
+
+
+def has(text, parts):
+    missing = [p for p in parts if p not in text]
+    check(
+        not missing,
+        "report has all %d expected parts (missing: %s)" % (len(parts), missing),
+    )
+
+
+def support_report(a, d):
+    """Click 'Support report...', wait for it, check the file. -> its text."""
+    app, n, shown = d.app, len(MSGS), len(SHOWN)
+    yield d.click("Support report...")
+    yield (lambda: not app.reporting and len(SHOWN) > shown, 120, "the support report")
+    yield d.pause(200)
+    expect(
+        n,
+        "info",
+        "Saved. Send this file to the mod author. You can open it first to see what's inside.",
+    )
+    p = SHOWN[-1]
+    check(
+        os.path.dirname(p) == app.out
+        and re.fullmatch(
+            r"TattooSeparator_support_\d{4}-\d\d-\d\d_\d{6}[.]txt", os.path.basename(p)
+        ),
+        "report in the output folder: %s" % p,
+    )
+    with open(p, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8").replace("\r\n", "\n")  # strict UTF-8; Windows line ends
+    log("  report (%d bytes):\n    " % len(raw) + text.replace("\n", "\n    "))
+    user = os.environ.get("USERNAME", "")
+    prof = os.environ.get("USERPROFILE", "")
+    check(
+        len(user) > 1 and user.lower() not in text.lower(),
+        "the Windows user name is nowhere in the report",
+    )
+    check(
+        prof.lower() not in text.lower() and "<user>" in text,
+        "the profile path is replaced by <user>",
+    )
+    check(len(raw) < g.REPORT_CAP + 1000, "report size capped")
+    a.reports.append(p)
+    return text
 
 
 def slow_server():
@@ -989,6 +1212,9 @@ def make_inputs(a):
     t["game"] = os.path.join(b, "fake game Ä", "Cyberpunk 2077")
     os.makedirs(os.path.join(t["game"], "archive", "pc"), exist_ok=True)
     os.makedirs(os.path.join(t["game"], "bin", "x64"), exist_ok=True)
+    open(
+        os.path.join(t["game"], "bin", "x64", "Cyberpunk2077.exe"), "wb"
+    ).close()  # empty stand-in
     if os.path.isfile(
         g.OODLE
     ):  # stands in for the game's DLL (copied from the user folder)
@@ -1044,27 +1270,43 @@ def main():
         g.WK_HOME = os.path.join(local, "close test", "wolvenkit")
         g.WK_URL = slow_server()
     os.makedirs(os.path.dirname(g.WK_HOME), exist_ok=True)
+    g.SESSION_FILE = os.path.join(local, "TattooSeparator", "last_session.txt")
     patch_dialogs()
     a.expected_tracebacks = 0
+    a.reports = []
     ok = True
     try:
         if not closing:
             log("== renamed from Tattoo Switchers: old folders are taken over")
             r = os.path.join(a.base, "rename Ä")
-            old, new = os.path.join(r, "Local", "TattooSwitcher"), os.path.join(r, "Local", "TattooSeparator")
+            old, new = (
+                os.path.join(r, "Local", "TattooSwitcher"),
+                os.path.join(r, "Local", "TattooSeparator"),
+            )
             os.makedirs(os.path.join(old, "wolvenkit"))
-            check(g.move_old_folder(old, new) == new and os.path.isdir(os.path.join(new, "wolvenkit"))
-                  and not os.path.exists(old), "%LOCALAPPDATA% folder moved once")
+            check(
+                g.move_old_folder(old, new) == new
+                and os.path.isdir(os.path.join(new, "wolvenkit"))
+                and not os.path.exists(old),
+                "%LOCALAPPDATA% folder moved once",
+            )
             check(g.move_old_folder(old, new) == new, "second start: nothing to move")
-            old, new = os.path.join(r, "Desktop", "TattooSwitcher"), os.path.join(r, "Desktop", "TattooSeparator")
+            old, new = (
+                os.path.join(r, "Desktop", "TattooSwitcher"),
+                os.path.join(r, "Desktop", "TattooSeparator"),
+            )
             os.makedirs(os.path.join(old, "work", "mytat"))
             os.makedirs(new)
             for f in ("gui_settings.json", os.path.join("work", "mytat", "list.json")):
                 with open(os.path.join(old, f), "w") as fh:
                     fh.write("{}")
-            check(g.take_over_old_list(new) and os.path.isfile(os.path.join(new, "work", "mytat", "list.json"))
-                  and os.path.isfile(os.path.join(new, "gui_settings.json"))
-                  and os.path.isfile(os.path.join(old, "gui_settings.json")), "old exe folder's list copied over")
+            check(
+                g.take_over_old_list(new)
+                and os.path.isfile(os.path.join(new, "work", "mytat", "list.json"))
+                and os.path.isfile(os.path.join(new, "gui_settings.json"))
+                and os.path.isfile(os.path.join(old, "gui_settings.json")),
+                "old exe folder's list copied over",
+            )
             check(not g.take_over_old_list(new), "copied only once")
         if closing:
             with open(os.path.join(a.base, "inputs.json"), encoding="utf-8") as f:

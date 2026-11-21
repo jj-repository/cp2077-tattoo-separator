@@ -89,6 +89,16 @@ did. Your list is kept in `work\<mod name>\` (next to `TattooSeparator.exe`) and
 you start the GUI again. If you unzipped it into a folder Windows doesn't let it write to (like
 `Program Files`), the `work` and `output` folders go to `%LOCALAPPDATA%\TattooSeparator\` instead.
 
+**Having a problem?** Click *Support report...* (bottom right, next to *Help*). It saves one text
+file, `TattooSeparator_support_<date>_<time>.txt`, in the `output` folder and shows it. Send that
+file to the mod author. It lists what you clicked, what the GUI did, the error messages, your setup
+(WolvenKit, Fun Tattoos file, your tattoo list) and what it finds in your game folder (ArchiveXL,
+RED4ext, the Angel body, your installed tattoo mod, old tattoo mods still installed). Your Windows
+user name is replaced by `<user>`, and no files or file contents are included. You can open it
+first to see what's inside. The GUI keeps the current and the previous session for this
+(`%LOCALAPPDATA%\TattooSeparator\last_session.txt`), so the report also helps when the problem
+happened the last time you used it.
+
 ---
 
 ## 1. What problem does this solve?

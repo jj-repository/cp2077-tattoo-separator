@@ -27,7 +27,8 @@ Sections 1 to 3 explain what the mod does, if you're curious.
    console version of WolvenKit (download "WolvenKit Console" from the WolvenKit GitHub page if you
    only have the normal one). The GUI remembers it.
 3. **Get the templates (once).** Click *Get templates...* and pick `fun_tattoos_angel_funsix.archive`
-   from the Fun Tattoos download. The GUI takes out the parts it needs by itself.
+   from the [Fun Tattoos](https://www.nexusmods.com/cyberpunk2077/mods/33230) download
+   (the "Fun Tattoos Angel Body" file). The GUI takes out the parts it needs by itself.
 4. **Name your mod.** Type a short name in *Mod name*, for example `mytat` (lowercase letters,
    digits and `_`). Set *Ink strength*: `1.0` is full colour, `0.6` looks faded.
 5. **Add tattoos.** Every tattoo becomes one choice in the character editor.

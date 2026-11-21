@@ -13,6 +13,11 @@ Self-test without a window (needs the Fun Tattoos archive and some tattoo source
       [--wk <WolvenKit.CLI.exe>]
   (TattooSwitcher.exe --selftest ... works too; the windowed exe has no console, so it writes
   selftest.log into the scratch dir and exits 0 / 1.)
+
+GUI test (drives the real window, every button; see guitest.py):
+  python tattoo_switcher_gui.py --guitest <empty scratch dir> --fun ... --mod ... --xbm ... --png ... [--wk ...]
+
+Threads: workers get only the queue and plain values (task -> _work). Never touch Tk from them.
 """
 
 import contextlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, traceback
@@ -93,6 +98,49 @@ class UserError(Exception):
     """A problem the user can fix; the message is shown as is."""
 
 
+RUNNING = set()  # WolvenKit processes still running
+
+
+def stop_running():
+    for p in list(RUNNING):
+        with contextlib.suppress(OSError):
+            p.kill()
+
+
+def _work(q, fn):
+    """Worker thread body. Gets only the queue and fn; fn must not hold Tk objects (widgets, tk
+    Variables, the App): if the last reference to one dies in this thread, Tcl aborts the process."""
+    try:
+        q.put(("done", fn()))
+    except UserError as e:
+        q.put(("log", "Problem: " + str(e).splitlines()[0]))
+        q.put(("error", str(e)))
+    except (
+        Exception
+    ) as e:  # unexpected: full details in the log, short message in the box
+        q.put(("log", traceback.format_exc()))
+        q.put(
+            (
+                "error",
+                "Something unexpected went wrong:\n%s\n\nDetails are in the log box."
+                % e,
+            )
+        )
+
+
+def read_picture(path):
+    """-> RGBA PIL image, or a plain UserError for anything Pillow can't read."""
+    try:
+        with Image.open(path) as im:
+            return im.convert("RGBA")
+    except Exception:
+        raise UserError(
+            "Can't read this picture:\n%s\n\nIt may be damaged, or not really a PNG. "
+            "Open it in an image program and save it again as PNG."
+            % os.path.basename(path)
+        )
+
+
 def load_settings():
     try:
         with open(SETTINGS, encoding="utf-8") as f:
@@ -132,9 +180,10 @@ class WolvenKit:
             % (args[0], os.path.basename(args[1]) if len(args) > 1 else "")
         )
         try:
-            r = subprocess.run(
+            r = subprocess.Popen(
                 [self.exe, *args],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -143,15 +192,27 @@ class WolvenKit:
             )
         except OSError as e:
             raise UserError("Could not start WolvenKit (%s)." % e)
-        out = r.stdout + r.stderr
+        RUNNING.add(r)  # closing the window mid-build stops it (stop_running)
+        try:
+            out = r.communicate()[0]
+        finally:
+            RUNNING.discard(r)
         if (
             r.returncode not in ok
             or "Unhandled exception" in out
             or "Error       ]" in out
         ):
             tail = "\n".join(out.strip().splitlines()[-8:])
+            what = {
+                "unbundle": "read %s. It may be damaged, or not a Cyberpunk .archive file",
+                "archiveinfo": "read %s. It may be damaged, or not a Cyberpunk .archive file",
+                "export": "turn %s into a picture. It may be damaged, or not a tattoo texture",
+            }.get(args[0], "build the mod files (step '%s')" % args[0])
+            if "%s" in what:
+                what %= os.path.basename(args[1])
             raise UserError(
-                "WolvenKit could not do '%s'. Its last messages:\n%s" % (args[0], tail)
+                "WolvenKit could not %s.\n\nWolvenKit's last messages (for a bug report):\n%s"
+                % (what, tail)
             )
         return out
 
@@ -295,6 +356,12 @@ class Project:
             self.tattoos, self.alpha = d["tattoos"], d.get("diffuse_alpha", 1.0)
         except FileNotFoundError:
             pass
+        except (OSError, ValueError, KeyError, TypeError):
+            raise UserError(
+                "The tattoo list of '%s' is damaged and can't be read:\n%s\n\n"
+                "Pick another mod name, or delete that file to start this mod's list again."
+                % (prefix, os.path.join(self.dir, "list.json"))
+            )
 
     def save(self):
         os.makedirs(self.tex, exist_ok=True)
@@ -337,6 +404,10 @@ class Project:
         ext = ".png" if image is not None else os.path.splitext(src)[1].lower()
         if ext not in (".png", ".xbm"):
             raise UserError("Tattoo pictures must be .png or .xbm files.")
+        if ext == ".png" and image is None:
+            image = read_picture(
+                src
+            )  # checks it, and RGBA PNGs are what WolvenKit imports
         t = {"key": key, "label": label, "part": part, "file": key + ext}
         if image is not None:
             image.save(self.file(t))
@@ -634,7 +705,46 @@ def selftest(a):
 
 
 # ----------------------------------------------------------------------------- window
-def run_gui():
+HELP_TEXT = """What this program does
+It builds one small mod that adds tattoo choices to the character editor (the mirror). Each body part (left arm, right arm, torso, legs, chest) gets its own setting, so you can switch tattoos on and off in the game instead of having a tattoo mod that is always on.
+For now it works only for a female V with the Angel body.
+
+You need: WolvenKit, ArchiveXL (installed in the game) and the Fun Tattoos download.
+
+Steps, in order
+1. Find WolvenKit (once). Click 'Find WolvenKit...' and pick WolvenKit.CLI.exe. That's the console version of WolvenKit. If you only have the normal WolvenKit, download "WolvenKit Console" from the WolvenKit GitHub page.
+
+2. Get the templates (once). Download Fun Tattoos from Nexus Mods:
+   https://www.nexusmods.com/cyberpunk2077/mods/33230
+   You need the file called "Fun Tattoos Angel Body". Click 'Get templates...' and pick fun_tattoos_angel_funsix.archive from that download. The program takes out only the parts it needs. 'Templates' then says 'ready'.
+
+3. Name your mod and set the ink. Type a short name in 'Mod name' (lowercase letters, digits and _, for example mytat). 'Ink strength': 1.0 is full colour, 0.6 looks faded.
+
+4. Add tattoos. Every tattoo becomes one choice in the character editor.
+   - 'Add picture (PNG)...': your own picture. Type the name shown in the game and pick the body part.
+   - 'Add from tattoo mod...': pick a tattoo mod's .archive (or an .xbm from it). The program finds the left arm, right arm and full-body pictures inside.
+   - 'Split full-body picture...': for a picture that covers the whole body. It is cut into three choices: Torso (the upper body, left of the red line), Legs (right of the red line) and Chest (the whole picture, uncut). Leave the red line at 0.59 unless a design is cut in the wrong place. Untick the parts you don't want.
+   - 'Rename...' changes the name shown in the game. 'Remove' takes a new tattoo off the list.
+
+5. Build. Click 'Build mod' and wait a minute or two. The first time, it may ask for your Cyberpunk 2077 folder to copy one file WolvenKit needs; nothing in the game is changed. You get two files in the output folder ('Open folder' shows it).
+
+6. Install. Click 'Install to game...' and pick your Cyberpunk 2077 folder (the one that contains 'bin' and 'archive'). Or copy both files into Cyberpunk 2077\\archive\\pc\\mod yourself.
+
+7. Remove the old tattoo mods you took the designs from. Otherwise they keep painting their tattoo onto the skin, even when the setting is Off.
+
+The one rule: add, never remove or move
+The game saves your choice as a position in the list ("the 3rd tattoo"). So tattoos that are already in a built mod (marked 'in built mod') can't be removed or moved, or old saves would suddenly show a different tattoo. You can still rename them. You can always add new tattoos: they go to the end of the list. Then build and install again.
+
+Good to know
+- Your list is kept and comes back when you start the program again.
+- A different mod name starts a separate mod with its own list.
+- The box at the bottom of the window shows what the program did. If something goes wrong, a message tells you what to do.
+"""
+
+
+def run_gui(setup=None):
+    """Open the window. setup(root, app), if given, runs before the main loop (used by --guitest)."""
+    import gc
     import tkinter as tk
     from tkinter import filedialog, messagebox, simpledialog, ttk
     from PIL import ImageDraw, ImageTk
@@ -644,12 +754,23 @@ def run_gui():
             self.root = root
             self.s = load_settings()
             self.q = queue.Queue()
-            self.busy = False
+            q = self.q
+            # the only logger handed to worker threads: it holds the queue, nothing from Tk
+            self.qlog = lambda msg: q.put(("log", msg))
+            self.busy = self.loading = False
+            self.on_done = None
             self.tdir = os.path.join(USER, "work", "templates")
             self.out = os.path.join(USER, "output")
-            self.last = None  # files of the last build
             self.thumbs = {}
+            self.actions = []  # widgets disabled while a step runs
             root.title("Tattoo Switchers %s" % VERSION)
+            root.report_callback_exception = self.callback_error
+            root.protocol("WM_DELETE_WINDOW", self.close)
+
+            def button(parent, text, cmd):
+                b = ttk.Button(parent, text=text, command=cmd)
+                self.actions.append(b)
+                return b
 
             setup = ttk.LabelFrame(root, text="1. Setup (once)")
             setup.pack(fill="x", padx=8, pady=(8, 4))
@@ -658,7 +779,7 @@ def run_gui():
                 row=0, column=0, sticky="w", padx=6, pady=3
             )
             ttk.Label(setup, textvariable=self.wk_var).grid(row=0, column=1, sticky="w")
-            ttk.Button(setup, text="Find WolvenKit...", command=self.pick_wk).grid(
+            button(setup, "Find WolvenKit...", self.pick_wk).grid(
                 row=0, column=2, padx=6, sticky="e"
             )
             ttk.Label(setup, text="Templates:").grid(
@@ -669,37 +790,38 @@ def run_gui():
             )
             tb = ttk.Frame(setup)
             tb.grid(row=1, column=2, padx=6, sticky="e")
-            ttk.Button(tb, text="Get templates...", command=self.pick_templates).pack(
-                side="left"
+            button(tb, "Get templates...", self.pick_templates).pack(side="left")
+            button(tb, "JSON folder...", lambda: self.pick_templates(folder=True)).pack(
+                side="left", padx=(4, 0)
             )
-            ttk.Button(
-                tb,
-                text="JSON folder...",
-                command=lambda: self.pick_templates(folder=True),
-            ).pack(side="left", padx=(4, 0))
             setup.columnconfigure(1, weight=1)
 
             sett = ttk.LabelFrame(root, text="2. Your mod")
             sett.pack(fill="x", padx=8, pady=4)
             ttk.Label(sett, text="Mod name:").pack(side="left", padx=6, pady=4)
             self.prefix_var = tk.StringVar(value=self.s.get("prefix", "mytat"))
-            e = ttk.Entry(sett, textvariable=self.prefix_var, width=16)
+            self.prefix_entry = e = ttk.Entry(
+                sett, textvariable=self.prefix_var, width=16
+            )
             e.pack(side="left")
             e.bind("<Return>", lambda _: self.load_project())
             e.bind("<FocusOut>", lambda _: self.load_project())
+            self.actions.append(e)
             ttk.Label(sett, text="(short, lowercase, e.g. mytat)").pack(
                 side="left", padx=(4, 20)
             )
             ttk.Label(sett, text="Ink strength:").pack(side="left")
             self.alpha_var = tk.DoubleVar(value=1.0)
-            ttk.Scale(
+            self.alpha_scale = ttk.Scale(
                 sett,
                 from_=0.3,
                 to=1.0,
                 variable=self.alpha_var,
                 length=160,
                 command=self.alpha_changed,
-            ).pack(side="left", padx=4)
+            )
+            self.alpha_scale.pack(side="left", padx=4)
+            self.actions.append(self.alpha_scale)
             self.alpha_lbl = ttk.Label(sett, width=5)
             self.alpha_lbl.pack(side="left")
             ttk.Label(sett, text="(1.0 full colour, 0.6 faded)").pack(side="left")
@@ -715,7 +837,7 @@ def run_gui():
                 ("Rename...", self.rename),
                 ("Remove", self.remove),
             ):
-                ttk.Button(bar, text=text, command=cmd).pack(side="left", padx=(0, 4))
+                button(bar, text, cmd).pack(side="left", padx=(0, 4))
             mid = ttk.Frame(lst)
             mid.pack(fill="both", expand=True, padx=4)
             self.tree = ttk.Treeview(
@@ -752,14 +874,13 @@ def run_gui():
 
             act = ttk.Frame(root)
             act.pack(fill="x", padx=8, pady=4)
-            self.build_btn = ttk.Button(act, text="Build mod", command=self.build)
+            self.build_btn = button(act, "Build mod", self.build)
             self.build_btn.pack(side="left")
             ttk.Button(act, text="Open folder", command=self.open_folder).pack(
                 side="left", padx=4
             )
-            ttk.Button(act, text="Install to game...", command=self.install).pack(
-                side="left"
-            )
+            button(act, "Install to game...", self.install).pack(side="left")
+            ttk.Button(act, text="Help", command=self.show_help).pack(side="right")
             self.status = ttk.Label(act, text="")
             self.status.pack(side="left", padx=10)
 
@@ -773,62 +894,61 @@ def run_gui():
             self.load_project()
             root.after(100, self.poll)
 
-        # ---- plumbing
-        def log(self, msg):  # thread-safe
+        # ---- plumbing (Tk only on this thread; workers talk through self.q)
+        def log(self, msg):
             self.q.put(("log", msg))
 
+        def write_log(self, msg):
+            self.logbox.configure(state="normal")
+            self.logbox.insert("end", msg + "\n")
+            self.logbox.see("end")
+            self.logbox.configure(state="disabled")
+
         def poll(self):
+            # schedule the next poll first: a callback below may open a dialog (nested event loop)
+            self.root.after(100, self.poll)
             try:
                 while True:
                     kind, val = self.q.get_nowait()
                     if kind == "log":
-                        self.logbox.configure(state="normal")
-                        self.logbox.insert("end", val + "\n")
-                        self.logbox.see("end")
-                        self.logbox.configure(state="disabled")
-                    else:
-                        val()
+                        self.write_log(val)
+                        continue
+                    done, self.on_done = self.on_done, None
+                    self.set_busy(False)
+                    if kind == "error":
+                        messagebox.showerror("Tattoo Switchers", val)
+                    elif done:
+                        done(val)
             except queue.Empty:
                 pass
-            self.root.after(100, self.poll)
+
+        def callback_error(self, exc, val, tb):
+            """Any unexpected error in a button or timer: details in the log box, a plain message."""
+            self.write_log("".join(traceback.format_exception(exc, val, tb)))
+            messagebox.showerror(
+                "Tattoo Switchers",
+                "Something unexpected went wrong:\n%s\n\nDetails are in the log box at the bottom. "
+                "Your tattoo list is saved." % val,
+            )
+
+        def set_busy(self, busy, label=""):
+            self.busy = busy
+            self.status.configure(text=label + " ..." if busy else "")
+            self.root.configure(cursor="watch" if busy else "")
+            for w in self.actions:
+                w.state(["disabled"] if busy else ["!disabled"])
 
         def task(self, label, fn, done=None):
-            """Run fn() in a thread (WolvenKit calls take seconds); done(result) back on the UI thread."""
+            """Run fn() in a thread (WolvenKit calls take seconds); done(result) back on this thread.
+            fn must not use Tk objects (see _work)."""
             if self.busy:
                 messagebox.showinfo(
                     "Busy", "Please wait until the current step is finished."
                 )
                 return
-            self.busy = True
-            self.status.configure(text=label + " ...")
-            self.root.configure(cursor="watch")
-
-            def work():
-                try:
-                    r = fn()
-                    ok = lambda: done and done(r)  # noqa: E731
-                except UserError as e:
-                    self.log("Problem: " + str(e).splitlines()[0])
-                    ok = lambda e=e: messagebox.showerror("Tattoo Switchers", str(e))  # noqa: E731
-                except (
-                    Exception
-                ) as e:  # unexpected: full details in the log, short message in the box
-                    self.log(traceback.format_exc())
-                    ok = lambda e=e: messagebox.showerror(  # noqa: E731
-                        "Tattoo Switchers",
-                        "Something unexpected went wrong:\n%s\n\nDetails are in the log box."
-                        % e,
-                    )
-
-                def finish():
-                    self.busy = False
-                    self.status.configure(text="")
-                    self.root.configure(cursor="")
-                    ok()
-
-                self.q.put(("call", finish))
-
-            threading.Thread(target=work, daemon=True).start()
+            self.on_done = done
+            self.set_busy(True, label)
+            threading.Thread(target=_work, args=(self.q, fn), daemon=True).start()
 
         def guard(self, fn, *a):
             try:
@@ -836,8 +956,27 @@ def run_gui():
             except UserError as e:
                 messagebox.showerror("Tattoo Switchers", str(e))
 
+        def ready(self):
+            """Start of every button that changes something: not busy, and the typed mod name is loaded."""
+            if self.busy:
+                messagebox.showinfo(
+                    "Busy", "Please wait until the current step is finished."
+                )
+                return False
+            return self.load_project()
+
         def wk(self):
-            return WolvenKit(self.s.get("wolvenkit"), self.log)
+            return WolvenKit(self.s.get("wolvenkit"), self.qlog)
+
+        def close(self):
+            if self.busy and not messagebox.askyesno(
+                "Close Tattoo Switchers",
+                "A step is still running. Close anyway?\n\n"
+                "The step is stopped. Your tattoo list is kept; just build again next time.",
+            ):
+                return
+            stop_running()
+            self.root.destroy()
 
         # ---- setup
         def refresh_setup(self):
@@ -852,6 +991,8 @@ def run_gui():
             )
 
         def pick_wk(self):
+            if self.busy:
+                return
             p = filedialog.askopenfilename(
                 title="Pick WolvenKit.CLI.exe",
                 filetypes=[
@@ -862,7 +1003,7 @@ def run_gui():
             if not p:
                 return
             p = os.path.normpath(p)
-            if self.guard(WolvenKit, p, self.log) is None:
+            if self.guard(WolvenKit, p, self.qlog) is None:
                 return
             self.s["wolvenkit"] = p
             save_settings(self.s)
@@ -870,6 +1011,8 @@ def run_gui():
             self.log("WolvenKit set: " + p)
 
         def pick_templates(self, folder=False):
+            if self.busy:
+                return
             if folder:
                 src = filedialog.askdirectory(
                     title="Folder with the 8 template JSON files"
@@ -884,24 +1027,36 @@ def run_gui():
             wk = None if folder else self.guard(self.wk)
             if not folder and wk is None:
                 return
+            src, tdir, log = os.path.normpath(src), self.tdir, self.qlog
             self.task(
                 "Getting templates",
-                lambda: import_templates(
-                    wk, os.path.normpath(src), self.tdir, self.log
-                ),
+                lambda: import_templates(wk, src, tdir, log),
                 lambda _: self.refresh_setup(),
             )
 
         # ---- project
         def load_project(self):
-            prefix = self.prefix_var.get().strip()
+            """Load the list of the typed mod name. -> True when that list is loaded."""
+            if self.busy or self.loading:  # never switch the list under a running step
+                return False
+            prefix = self.prefix_var.get().strip().lower()
+            if prefix != self.prefix_var.get():
+                self.prefix_var.set(prefix)
             if self.project and prefix == self.project.prefix:
-                return
-            p = self.guard(Project, USER, prefix)
-            if p is None:
-                if self.project:
+                return True
+            try:
+                p = Project(USER, prefix)
+            except UserError as e:
+                if (
+                    self.project
+                ):  # back to the loaded name before the box takes the focus
                     self.prefix_var.set(self.project.prefix)
-                return
+                self.loading = True  # the box's FocusOut must not ask again
+                try:
+                    messagebox.showerror("Tattoo Switchers", str(e))
+                finally:
+                    self.loading = False
+                return False
             if (
                 self.project
                 and self.project.tattoos
@@ -910,7 +1065,8 @@ def run_gui():
                 # new mod name: take the current list along (copied; the old mod stays as it was)
                 if messagebox.askyesno(
                     "New mod name",
-                    "Start '%s' with the tattoos from '%s'?\n(No = start with an empty list)"
+                    "Start the new mod '%s' with the tattoos from '%s'?\n\n"
+                    "Yes = copy the list (the old mod stays as it is)\nNo = start with an empty list"
                     % (prefix, self.project.prefix),
                 ):
                     shutil.copytree(self.project.tex, p.tex, dirs_exist_ok=True)
@@ -923,16 +1079,19 @@ def run_gui():
             self.alpha_var.set(p.alpha)
             self.alpha_lbl.configure(text="%.2f" % p.alpha)
             self.refresh_list()
+            return True
 
         def alpha_changed(self, _=None):
             v = round(self.alpha_var.get(), 2)
             self.alpha_lbl.configure(text="%.2f" % v)
-            if self.project:
+            if self.project and not self.busy:
                 self.project.alpha = v
                 self.project.save()
 
         def refresh_list(self, select=None):
             self.tree.delete(*self.tree.get_children())
+            if not self.project:
+                return
             locked = self.project.locked()
             for t in self.project.tattoos:
                 self.tree.insert(
@@ -958,7 +1117,7 @@ def run_gui():
             )
 
         def thumb(self, path, size):
-            im = Image.open(path).convert("RGBA")
+            im = read_picture(path)
             im.thumbnail((size, size))
             bg = Image.new(
                 "RGBA", im.size, (200, 190, 180, 255)
@@ -977,16 +1136,21 @@ def run_gui():
                     image="", text="(no preview)" if t else "(select a tattoo)"
                 )
                 return
-            img = ImageTk.PhotoImage(self.thumb(path, 220))
+            try:
+                img = ImageTk.PhotoImage(self.thumb(path, 220))
+            except UserError:
+                return self.preview.configure(image="", text="(no preview)")
             self.thumbs["sel"] = img
             self.preview.configure(image=img, text="")
 
         # ---- adding
         def add_png(self):
+            if not self.ready():
+                return
             p = filedialog.askopenfilename(
                 title="Pick a tattoo picture", filetypes=[("PNG picture", "*.png")]
             )
-            if p:
+            if p and self.guard(read_picture, p):
                 self.offer([(p, p, None, os.path.splitext(os.path.basename(p))[0])])
 
         def incoming(self):
@@ -995,23 +1159,37 @@ def run_gui():
             shutil.rmtree(d, ignore_errors=True)
             return d
 
+        def read_source(self, p, full=False):
+            """Extract the tattoo pictures of a mod's .archive / .xbm in a thread, then offer them."""
+            wk = self.guard(self.wk)
+            if not wk:
+                return
+            p, tmp = os.path.normpath(p), self.incoming()
+            self.task(
+                "Reading " + os.path.basename(p),
+                lambda: prepare_source(wk, p, tmp),
+                (
+                    lambda items: self.offer(
+                        [(s, pv, "full", n) for s, pv, _, n in items]
+                    )
+                )
+                if full
+                else self.offer,
+            )
+
         def add_mod(self):
+            if not self.ready():
+                return
             p = filedialog.askopenfilename(
                 title="Pick a tattoo mod's .archive (or an .xbm from it)",
                 filetypes=[("Tattoo mod", "*.archive *.xbm")],
             )
-            if not p:
-                return
-            wk = self.guard(self.wk)
-            if wk:
-                tmp = self.incoming()
-                self.task(
-                    "Reading " + os.path.basename(p),
-                    lambda: prepare_source(wk, os.path.normpath(p), tmp),
-                    self.offer,
-                )
+            if p:
+                self.read_source(p)
 
         def add_split(self):
+            if not self.ready():
+                return
             p = filedialog.askopenfilename(
                 title="Pick a full-body tattoo picture (PNG, or v_overlay.xbm / a full-body tattoo mod)",
                 filetypes=[("Picture or tattoo mod", "*.png *.xbm *.archive")],
@@ -1019,19 +1197,12 @@ def run_gui():
             if not p:
                 return
             if p.lower().endswith(".png"):
-                return self.offer(
-                    [(p, p, "full", os.path.splitext(os.path.basename(p))[0])]
-                )
-            wk = self.guard(self.wk)
-            if wk:
-                tmp = self.incoming()
-                self.task(
-                    "Reading " + os.path.basename(p),
-                    lambda: prepare_source(wk, os.path.normpath(p), tmp),
-                    lambda items: self.offer(
-                        [(s, pv, "full", n) for s, pv, _, n in items]
-                    ),
-                )
+                if self.guard(read_picture, p):
+                    self.offer(
+                        [(p, p, "full", os.path.splitext(os.path.basename(p))[0])]
+                    )
+                return
+            self.read_source(p, full=True)
 
         def offer(self, items):
             """One dialog per found picture. row 'full' -> split dialog."""
@@ -1043,19 +1214,22 @@ def run_gui():
             self.refresh_list()
 
         def add_dialog(self, src, prev, row, name):
+            try:
+                img = ImageTk.PhotoImage(self.thumb(prev, 200)) if prev else None
+            except UserError as e:
+                return messagebox.showerror("Tattoo Switchers", str(e))
             d = tk.Toplevel(self.root)
             d.title("Add tattoo")
             d.transient(self.root)
             d.grab_set()
-            if prev:
-                img = ImageTk.PhotoImage(self.thumb(prev, 200))
+            if img:
                 d._img = img
                 ttk.Label(d, image=img).grid(row=0, column=0, rowspan=4, padx=8, pady=8)
             ttk.Label(d, text=os.path.basename(src)).grid(
                 row=0, column=1, columnspan=2, sticky="w", pady=(8, 0)
             )
             ttk.Label(d, text="Name in game:").grid(row=1, column=1, sticky="w", padx=4)
-            nv = tk.StringVar(value=name.replace("_", " ").title())
+            nv = tk.StringVar(d, value=name.replace("_", " ").title())
             ttk.Entry(d, textvariable=nv, width=28).grid(
                 row=1, column=2, padx=4, pady=4
             )
@@ -1063,16 +1237,16 @@ def run_gui():
             choices = [PART_NAME[p["id"]] for p in PARTS] + [
                 "Full body (split into Torso + Legs + Chest)"
             ]
-            pv = tk.StringVar(value=PART_NAME.get(row, ""))
+            pv = tk.StringVar(d, value=PART_NAME.get(row, ""))
             ttk.Combobox(
                 d, textvariable=pv, values=choices, state="readonly", width=40
             ).grid(row=2, column=2, padx=4, pady=4)
 
             def ok():
-                part = next((k for k, v in PART_NAME.items() if v == pv.get()), None)
                 if pv.get().startswith("Full body"):
                     d.destroy()
                     return self.split_dialog(prev, nv.get())
+                part = next((k for k, v in PART_NAME.items() if v == pv.get()), None)
                 is_png = src.lower().endswith(".png")
                 t = self.guard(
                     self.project.add,
@@ -1093,19 +1267,22 @@ def run_gui():
             self.root.wait_window(d)
 
         def split_dialog(self, png, name):
+            try:
+                small = self.thumb(png, 300)
+            except UserError as e:
+                return messagebox.showerror("Tattoo Switchers", str(e))
+            S = small.size[0]
             d = tk.Toplevel(self.root)
             d.title("Split full-body picture")
             d.transient(self.root)
             d.grab_set()
-            small = self.thumb(png, 300)
-            S = small.size[0]
             top = ttk.Frame(d)
             top.pack(fill="x", padx=8, pady=8)
             ttk.Label(top, text="Name in game:").pack(side="left")
-            nv = tk.StringVar(value=name.replace("_", " ").title())
+            nv = tk.StringVar(d, value=name.replace("_", " ").title())
             ttk.Entry(top, textvariable=nv, width=26).pack(side="left", padx=4)
             ttk.Label(top, text="Cut at:").pack(side="left", padx=(16, 0))
-            sv = tk.DoubleVar(value=0.59)
+            sv = tk.DoubleVar(d, value=0.59)
             ttk.Scale(
                 top,
                 from_=0.40,
@@ -1134,7 +1311,7 @@ def run_gui():
                 f.grid(row=0, column=1 + i, padx=4, sticky="n")
                 cells[part] = ttk.Label(f)
                 cells[part].pack()
-                use[part] = tk.BooleanVar(value=True)
+                use[part] = tk.BooleanVar(d, value=True)
                 ttk.Checkbutton(
                     f, text="add as " + PART_NAME[part], variable=use[part]
                 ).pack()
@@ -1145,7 +1322,7 @@ def run_gui():
                 im = small.copy()
                 x = round(s * S)
                 ImageDraw.Draw(im).line(
-                    [(x, 0), (x, S)], fill=(230, 0, 0, 255), width=2
+                    [(x, 0), (x, im.size[1])], fill=(230, 0, 0, 255), width=2
                 )
                 d._imgs = [ImageTk.PhotoImage(im)]
                 big.configure(image=d._imgs[0])
@@ -1156,7 +1333,8 @@ def run_gui():
 
             def ok():
                 parts = [p for p in SPLIT_PARTS if use[p].get()]
-                if not parts or not nv.get().strip():
+                label = nv.get().strip()
+                if not parts or not label:
                     return messagebox.showerror(
                         "Tattoo Switchers",
                         "Give it a name and tick at least one part.",
@@ -1165,25 +1343,19 @@ def run_gui():
                 s = round(sv.get(), 2)
                 d.destroy()
 
-                def work():
-                    pieces = split_image(Image.open(png), s)
-                    return [
-                        self.project.add(nv.get(), p, image=pieces[p]) for p in parts
-                    ]
+                def added(pieces):  # back on the window's thread
+                    ts = [self.project.add(label, p, image=pieces[p]) for p in parts]
+                    self.log(
+                        "Added '%s' as %s."
+                        % (label, ", ".join(PART_NAME[t["part"]] for t in ts))
+                    )
+                    self.refresh_list()
 
+                # the thread only cuts the picture (plain values in, PIL images out)
                 self.task(
                     "Splitting",
-                    work,
-                    lambda ts: (
-                        self.log(
-                            "Added '%s' as %s."
-                            % (
-                                nv.get().strip(),
-                                ", ".join(PART_NAME[t["part"]] for t in ts),
-                            )
-                        ),
-                        self.refresh_list(),
-                    ),
+                    lambda: split_image(read_picture(png), s),
+                    lambda pieces: self.guard(added, pieces),
                 )
 
             draw()
@@ -1194,9 +1366,13 @@ def run_gui():
             self.root.wait_window(d)
 
         def rename(self):
+            if not self.ready():
+                return
             t = self.selected()
             if not t:
-                return messagebox.showinfo("Rename", "Select a tattoo first.")
+                return messagebox.showinfo(
+                    "Rename", "Select a tattoo in the list first."
+                )
             n = simpledialog.askstring(
                 "Rename", "New name in game:", initialvalue=t["label"], parent=self.root
             )
@@ -1204,26 +1380,61 @@ def run_gui():
                 self.refresh_list(t["key"])
 
         def remove(self):
+            if not self.ready():
+                return
             t = self.selected()
             if not t:
-                return messagebox.showinfo("Remove", "Select a tattoo first.")
+                return messagebox.showinfo(
+                    "Remove", "Select a tattoo in the list first."
+                )
             if t["key"] not in self.project.locked() and not messagebox.askyesno(
-                "Remove", "Remove '%s'?" % t["label"]
+                "Remove", "Remove '%s' from the list?" % t["label"]
             ):
                 return
             self.guard(self.project.remove, t["key"])
             self.refresh_list()
 
+        def show_help(self):
+            w = tk.Toplevel(self.root)
+            w.title("Tattoo Switchers - Help")
+            w.transient(self.root)
+            t = tk.Text(
+                w,
+                width=84,
+                height=34,
+                wrap="word",
+                font=("Segoe UI", 10),
+                padx=10,
+                pady=8,
+            )
+            sb = ttk.Scrollbar(w, command=t.yview)
+            t.configure(yscrollcommand=sb.set)
+            ttk.Button(w, text="Close", command=w.destroy).pack(side="bottom", pady=6)
+            sb.pack(side="right", fill="y")
+            t.pack(fill="both", expand=True)
+            t.insert("end", HELP_TEXT)
+            t["state"] = "disabled"
+            return w
+
         # ---- build / install
+        def built(self):
+            """This mod's two files in the output folder, if it was built."""
+            n = os.path.join(self.out, self.project.prefix + "_tattoos.archive")
+            files = (n, n + ".xl")
+            return files if all(map(os.path.isfile, files)) else None
+
         def build(self):
+            if not self.ready():
+                return
             wk = self.guard(self.wk)
             if not wk:
                 return
             if not oodle_ok():
                 if not messagebox.askokcancel(
                     "One-time setup",
-                    "WolvenKit needs a file from the game (oo2ext_7_win64.dll) to pack textures correctly.\n"
-                    "Pick your Cyberpunk 2077 folder and it will be copied to your user folder (nothing in the game is changed).",
+                    "WolvenKit needs a file from the game (oo2ext_7_win64.dll) to pack textures correctly.\n\n"
+                    "Pick your Cyberpunk 2077 folder next. The file is copied to your user folder; "
+                    "nothing in the game is changed.",
                 ):
                     return
                 g = filedialog.askdirectory(title="Pick the Cyberpunk 2077 folder")
@@ -1234,48 +1445,55 @@ def run_gui():
                     return
                 self.s["game"] = os.path.normpath(g)
                 save_settings(self.s)
-            p = self.project
+            p, tdir, out, log = self.project, self.tdir, self.out, self.qlog
 
             def done(res):
-                self.last = res
                 self.refresh_list()
                 self.log(
-                    "Done: %s and %s are in %s"
-                    % (*map(os.path.basename, res), self.out)
+                    "Done: %s and %s are in %s" % (*map(os.path.basename, res), out)
                 )
                 messagebox.showinfo(
                     "Tattoo Switchers",
-                    "Your mod is ready:\n\n%s\n%s\n\nClick 'Install to game...' or copy both files to Cyberpunk 2077\\archive\\pc\\mod\\."
-                    % res,
+                    "Your mod is ready:\n\n%s\n%s\n\nClick 'Install to game...', or copy both files "
+                    "to Cyberpunk 2077\\archive\\pc\\mod\\." % res,
                 )
 
             self.log("Building %s_tattoos ..." % p.prefix)
-            self.task(
-                "Building", lambda: p.build(wk, self.tdir, self.out, self.log), done
-            )
+            self.task("Building", lambda: p.build(wk, tdir, out, log), done)
 
         def open_folder(self):
-            os.makedirs(self.out, exist_ok=True)
-            os.startfile(self.out)
+            try:
+                os.makedirs(self.out, exist_ok=True)
+                os.startfile(self.out)
+            except OSError as e:
+                messagebox.showerror(
+                    "Tattoo Switchers",
+                    "Could not open the folder:\n%s\n\n(%s)" % (self.out, e),
+                )
 
         def install(self):
-            if not self.last or not all(os.path.isfile(f) for f in self.last):
-                return messagebox.showinfo("Install", "Build the mod first.")
+            if not self.ready():
+                return
+            files = self.built()
+            if not files:
+                return messagebox.showinfo(
+                    "Install", "Build the mod first (click 'Build mod')."
+                )
             g = filedialog.askdirectory(
                 title="Pick the Cyberpunk 2077 folder",
                 initialdir=self.s.get("game") or None,
             )
             if not g:
                 return
-            mod = self.guard(install, self.last, os.path.normpath(g))
+            mod = self.guard(install, files, os.path.normpath(g))
             if mod:
                 self.s["game"] = os.path.normpath(g)
                 save_settings(self.s)
                 self.log("Installed into " + mod)
                 messagebox.showinfo(
                     "Installed",
-                    "Copied both files into\n%s\n\nRemember to remove the tattoo mods you took the designs from."
-                    % mod,
+                    "Copied both files into\n%s\n\nNow remove the tattoo mods you took the designs from, "
+                    "or they keep painting their tattoo onto the skin." % mod,
                 )
 
     try:  # sharp text on scaled Windows displays
@@ -1285,10 +1503,21 @@ def run_gui():
     except Exception:
         pass
     root = tk.Tk()
-    App(root)
+    app = App(root)
+    if setup:
+        setup(root, app)
     if "--smoke" in sys.argv:  # open, draw, close (used by the tests)
         root.after(1500, root.destroy)
     root.mainloop()
+    del app, root
+    gc.collect()  # free Tk objects here on the main thread, never later in a worker
+
+
+def log_to_file(path):
+    """The windowed .exe has no console (sys.stdout is None): send prints to a file."""
+    if sys.stdout is None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        sys.stdout = sys.stderr = open(path, "w", encoding="utf-8", buffering=1)
 
 
 def main():
@@ -1301,6 +1530,10 @@ def main():
         except Exception:
             pass
         sys.exit(msg)
+    if "--guitest" in sys.argv or "--guitest-close" in sys.argv:
+        import guitest
+
+        sys.exit(guitest.main())
     if "--selftest" in sys.argv:
         import argparse
 
@@ -1309,14 +1542,7 @@ def main():
             ap.add_argument(o, required=True)
         ap.add_argument("--wk")
         a = ap.parse_args()
-        if sys.stdout is None:  # windowed .exe: no console, so log to a file
-            os.makedirs(a.selftest, exist_ok=True)
-            sys.stdout = sys.stderr = open(
-                os.path.join(a.selftest, "selftest.log"),
-                "w",
-                encoding="utf-8",
-                buffering=1,
-            )
+        log_to_file(os.path.join(a.selftest, "selftest.log"))
         try:
             selftest(a)
         except BaseException:

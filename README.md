@@ -15,6 +15,9 @@ You don't need to know any programming for this, and you don't need Python. You 
 from [section 4](#4-what-you-need): WolvenKit, ArchiveXL and the Fun Tattoos download.
 Sections 1 to 3 explain what the mod does, if you're curious.
 
+The window has a **Help** button (bottom right) that shows these same steps in short, so you
+don't need to keep this page open.
+
 1. **Start it.** Download `TattooSwitcher.zip` from the
    [Releases page](https://github.com/jj-repository/cp2077-tattoo-switchers/releases), unzip it
    anywhere (for example on your Desktop), and double-click `TattooSwitcher.exe`.
@@ -318,9 +321,11 @@ people's designs unless they allow it.
 ## License
 
 To build `TattooSwitcher.exe` yourself, run `build_exe.bat` (needs Python; the result is in
-`dist\TattooSwitcher\`).
+`dist\TattooSwitcher\`). `tattoo_switcher_gui.py --guitest ...` (or `TattooSwitcher.exe --guitest ...`)
+clicks through every button of the real window and writes `guitest.log`; the arguments are listed
+at the top of `guitest.py`.
 
-The code in this repo (`build.py`, `tattoo_switcher_gui.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
+The code in this repo (`build.py`, `tattoo_switcher_gui.py`, `guitest.py`, `tools/`) is under the MIT license, see [LICENSE](LICENSE). That
 does not cover Fun Tattoos' files, game files or tattoo pictures.
 
 by jj-repository

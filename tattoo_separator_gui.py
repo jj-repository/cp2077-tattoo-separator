@@ -2224,7 +2224,8 @@ def run_gui(setup=None):
             )
             old = t["label"]
             if n is not None and self.guard(self.project.rename, t["key"], n) is None:
-                self.rec.add("action", "rename: '%s' -> '%s'" % (old, t["label"]))
+                if t["label"] != old:  # guard also returns None after an error box
+                    self.rec.add("action", "rename: '%s' -> '%s'" % (old, t["label"]))
                 self.refresh_list(t["key"])
 
         def remove(self):
@@ -2239,12 +2240,19 @@ def run_gui(setup=None):
                 "Remove", "Remove '%s' from the list?" % t["label"]
             ):
                 return
-            self.rec.add(
-                "action",
-                "remove: '%s' (%s, source %s)"
-                % (t["label"], PART_NAME[t["part"]], t.get("source") or "not recorded"),
-            )
             self.guard(self.project.remove, t["key"])
+            if (
+                t not in self.project.tattoos
+            ):  # not refused (built tattoos can't be removed)
+                self.rec.add(
+                    "action",
+                    "remove: '%s' (%s, source %s)"
+                    % (
+                        t["label"],
+                        PART_NAME[t["part"]],
+                        t.get("source") or "not recorded",
+                    ),
+                )
             self.refresh_list()
 
         def show_help(self):

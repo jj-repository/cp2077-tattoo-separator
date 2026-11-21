@@ -856,6 +856,11 @@ def session1(a, d):
         < text.index("5. Game folder check"),
         "sections in order",
     )
+    check(
+        "rename: 'Arm Tätowierung' -> 'Arm Tätowierung'" not in text
+        and "remove: 'Arm Renamed'" not in text,
+        "a refused rename / remove is not recorded as done",
+    )
     info = app.report_info()
     info["tdir"] = None  # a part that fails: the report says so and goes on
     broken = g.support_report(info)
